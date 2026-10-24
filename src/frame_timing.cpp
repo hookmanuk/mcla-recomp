@@ -26,6 +26,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
+#include <rex/ui/vulkan/vr_openxr.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -86,6 +87,7 @@ void WaitForFrameDeadline() {
   if (std::this_thread::get_id() != owner) {
     return;
   }
+  rex::ui::vulkan::vr::PaceGameFrame();  // VR fork: one game frame per headset frame while the game outpaces it
 
   const int32_t fps = REXCVAR_GET(mcla_fps);
   if (fps <= 0) {

@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -113,7 +114,8 @@ void RunProfile(std::string path, int delay_s, int seconds) {
   for (size_t i = 0; i < count; ++i) {
     const uint64_t pc = samples[i].pc;
     std::string where;
-    if (uint32_t guest = MclaGuestFunctionForHostPc(static_cast<uintptr_t>(pc))) {
+    static const bool raw = std::getenv("MCLA_PROFILE_RAW") != nullptr;  // VR fork: module offsets for a PDB
+    if (uint32_t guest = raw ? 0 : MclaGuestFunctionForHostPc(static_cast<uintptr_t>(pc))) {
       std::snprintf(buffer, sizeof buffer, "guest sub_%08X", guest);
       where = buffer;
     } else {

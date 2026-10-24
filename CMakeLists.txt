@@ -24,6 +24,7 @@ set(MCLA_SOURCES
     src/settings_menu.cpp
     src/sampling_profiler.cpp
     src/code_pointer_scan.cpp
+    src/vr_perf_probe.cpp
 )
 
 if(WIN32)
