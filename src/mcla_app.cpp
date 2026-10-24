@@ -39,6 +39,8 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
   }
 }
 
+void MclaConfigureGpuDefaults();  // perf_options.cpp
+
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   config.audio_factory = &CreateMclaAudioSystem;
   if (config.gpu_plugin.empty()) {
@@ -57,6 +59,7 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
 }
 
 void MclaApp::OnPostSetup() {
+  MclaConfigureGpuDefaults();  // the GPU plugin's cvars exist from here
   ConfigureFrameTiming();
 
 

@@ -46,7 +46,23 @@ namespace {
 struct Sample {
   uint32_t thread_id;
   uint64_t pc;
+  uint64_t caller;  // MCLA_PROFILE_CALLERS: outside our modules, the nearest return address into them on the stack
 };
+
+// Our modules (mcla.exe, rexruntime.dll, rexgpu-xenos.dll): [start, end).
+std::vector<std::pair<uint64_t, uint64_t>> OurModules() {
+  std::vector<std::pair<uint64_t, uint64_t>> ranges;
+  for (const char* name : {static_cast<const char*>(nullptr), "rexruntime.dll", "rexgpu-xenos.dll"}) {
+    const auto base = reinterpret_cast<const uint8_t*>(GetModuleHandleA(name));
+    if (!base) {
+      continue;
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    ranges.emplace_back(uint64_t(base), uint64_t(base) + nt->OptionalHeader.SizeOfImage);
+  }
+  return ranges;
+}
 
 std::vector<uint32_t> OtherThreadIds() {
   std::vector<uint32_t> ids;
@@ -85,6 +101,16 @@ void RunProfile(std::string path, int delay_s, int seconds) {
   // suspended thread could be holding the heap or logger lock.
   std::vector<Sample> samples;
   samples.resize(static_cast<size_t>(seconds) * 1100 * threads.size());
+  static const bool callers = std::getenv("MCLA_PROFILE_CALLERS") != nullptr;
+  const auto ours = OurModules();
+  const auto in_ours = [&ours](uint64_t address) {
+    for (const auto& [start, end] : ours) {
+      if (address >= start && address < end) {
+        return true;
+      }
+    }
+    return false;
+  };
   size_t count = 0;
   const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
   uint64_t rounds = 0;
@@ -96,7 +122,15 @@ void RunProfile(std::string path, int delay_s, int seconds) {
       CONTEXT context;
       context.ContextFlags = CONTEXT_CONTROL;
       if (GetThreadContext(handle, &context)) {
-        samples[count++] = {id, context.Rip};
+        uint64_t caller = 0;
+        if (callers && !in_ours(context.Rip)) {
+          // Plain reads of the suspended thread's stack (no locks, no allocation).
+          const auto* stack = reinterpret_cast<const uint64_t*>(context.Rsp);
+          for (int i = 0; i < 64 && !caller; ++i) {
+            caller = in_ours(stack[i]) ? stack[i] : 0;
+          }
+        }
+        samples[count++] = {id, context.Rip, caller};
       }
       ResumeThread(handle);
     }
@@ -133,6 +167,19 @@ void RunProfile(std::string path, int delay_s, int seconds) {
         std::snprintf(buffer, sizeof buffer, "unknown 0x%llX", static_cast<unsigned long long>(pc));
       }
       where = buffer;
+    }
+    if (samples[i].caller) {
+      HMODULE module = nullptr;
+      if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                             reinterpret_cast<LPCSTR>(samples[i].caller), &module) &&
+          module) {
+        char name[MAX_PATH];
+        GetModuleFileNameA(module, name, sizeof name);
+        const char* base = std::strrchr(name, '\\');
+        std::snprintf(buffer, sizeof buffer, " <- module %s 0x%llX", base ? base + 1 : name,
+                      static_cast<unsigned long long>(samples[i].caller - reinterpret_cast<uint64_t>(module)));
+        where += buffer;
+      }
     }
     ++hits[{samples[i].thread_id, where}];
   }
