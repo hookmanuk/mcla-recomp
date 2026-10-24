@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -132,8 +133,20 @@ extern "C" REX_FUNC(sub_8217D460) {
       }
     }
     if (frame.posed) {
-      ctx.f1.f64 = 2.0 * std::atan(double(frame.tangents[2])) * 57.29577951308232;
-      ctx.f2.f64 = double(frame.tangents[1]) / double(frame.tangents[2]);
+      static const bool game_fov = [] {  // development: MCLA_VR_GAME_FOV=1 keeps the game's field of view
+        const char* v = std::getenv("MCLA_VR_GAME_FOV");
+        return v && v[0] == '1';
+      }();
+      if (game_fov) {
+        const float v = float(std::tan(ctx.f1.f64 * 0.5 / 57.29577951308232)), h = v * float(ctx.f2.f64);
+        frame.tangents[0] = -h;
+        frame.tangents[1] = h;
+        frame.tangents[2] = v;
+        frame.tangents[3] = -v;
+      } else {
+        ctx.f1.f64 = 2.0 * std::atan(double(frame.tangents[2])) * 57.29577951308232;
+        ctx.f2.f64 = double(frame.tangents[1]) / double(frame.tangents[2]);
+      }
       vr::SetFramePose(frame.pose, frame.tangents);
     }
   }
