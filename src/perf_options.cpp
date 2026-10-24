@@ -290,10 +290,13 @@ void TickAbTest() {
 // every frame; watching those pages costs a write fault on the game thread and a protection change on the GPU thread
 // for each, every frame. A page faulting twice within a second stays unwatched (shared_memory_hot_page_faults) and
 // is uploaded whole when a draw needs it, only if it differs from its last upload (shared_memory_hot_page_compare).
-// Free roam, stereo VR: 63 -> 78 FPS parked, frame 14.5 -> 13.0 ms driving. Values given on the command line win.
+// Free roam, stereo VR: 63 -> 78 FPS parked, frame 14.5 -> 13.0 ms driving. The page state is kept from frame to
+// frame (clear_memory_page_state off, as the PS5 port does): otherwise every page in use is copied again each frame
+// (1.6 GB/s -> 69 MB/s; stereo VR 80 -> 98 FPS parked). Values given on the command line win.
 void MclaConfigureGpuDefaults() {
   for (const auto& [name, value] : {std::pair<const char*, const char*>{"shared_memory_hot_page_faults", "2"},
-                                    std::pair<const char*, const char*>{"shared_memory_hot_page_exact", "0"}}) {
+                                    std::pair<const char*, const char*>{"shared_memory_hot_page_exact", "0"},
+                                    std::pair<const char*, const char*>{"clear_memory_page_state", "false"}}) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName(name, value);
     }
