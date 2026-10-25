@@ -607,10 +607,10 @@ index 27a5136..01e8be8 100644
    // If the preferred caching behavior is not available, pick any host-visible.
 diff --git a/include/rex/ui/vulkan/vr_dlss.h b/include/rex/ui/vulkan/vr_dlss.h
 new file mode 100644
-index 0000000..ca629c8
+index 0000000..91d3fe9
 --- /dev/null
 +++ b/include/rex/ui/vulkan/vr_dlss.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,56 @@
 +// VR fork: DLSS for the headset's eyes, through the MIT bridge bbport_dlss.dll (Driveclub's, ABI 3: a feature per
 +// eye). The program holds no NVIDIA code: the bridge (with nvngx_dlss.dll) is loaded from the program's folder when
 +// present and vr_dlss is on; without it nothing changes.
@@ -658,6 +658,13 @@ index 0000000..ca629c8
 +/// fill_column / fill_row: the first column / row was left unwritten at a resolution scale (taken from the next).
 +bool ApplyInPlace(VkCommandBuffer cmd, VkImage image, VkImageLayout layout, uint32_t width, uint32_t height,
 +                  bool fill_column, bool fill_row);
++/// The headset's eye size for a render size: vr_dlss_output_scale times it while DLSS runs, else the render size.
++void OutputSize(uint32_t width, uint32_t height, uint32_t& output_width, uint32_t& output_height);
++/// Replay (each eye), an upscale: the scene `image` (TRANSFER_SRC_OPTIMAL, `width` x `height`) through DLSS into
++/// `target` (TRANSFER_DST_OPTIMAL) at x `target_x`, `target_width` x `target_height` (OutputSize). False when not
++/// applied (nothing written).
++bool UpscaleInto(VkCommandBuffer cmd, VkImage image, uint32_t width, uint32_t height, bool fill_column,
++                 bool fill_row, VkImage target, int32_t target_x, uint32_t target_width, uint32_t target_height);
 +
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/include/rex/ui/vulkan/vr_openxr.h b/include/rex/ui/vulkan/vr_openxr.h
@@ -3671,10 +3678,10 @@ index 0000000..924e791
 +	0x00000046,0x0000003f,0x00040063,0x00000037,0x00000038,0x00000046,0x000100fd,0x00010038
 diff --git a/src/ui/vulkan/vr_dlss.cpp b/src/ui/vulkan/vr_dlss.cpp
 new file mode 100644
-index 0000000..b15e8bc
+index 0000000..7fcbabd
 --- /dev/null
 +++ b/src/ui/vulkan/vr_dlss.cpp
-@@ -0,0 +1,758 @@
+@@ -0,0 +1,817 @@
 +// VR fork: DLSS for the headset's eyes (vr_dlss.h).
 +#include <rex/ui/vulkan/vr_dlss.h>
 +
@@ -3704,6 +3711,8 @@ index 0000000..b15e8bc
 +#endif
 +
 +REXCVAR_DEFINE_BOOL(vr_dlss, false, "VR", "DLSS in VR (needs bbport_dlss.dll and nvngx_dlss.dll beside the program)");
++REXCVAR_DEFINE_DOUBLE(vr_dlss_output_scale, 1.0, "VR",
++                      "DLSS's output to the headset at this scale of the render size (1: DLAA; 1.5: an upscale)");
 +
 +namespace rex::ui::vulkan::vr::dlss {
 +
@@ -3945,6 +3954,16 @@ index 0000000..b15e8bc
 +};
 +std::array<Eye, 2> eyes;
 +
++}  // namespace
++
++void OutputSize(uint32_t width, uint32_t height, uint32_t& output_width, uint32_t& output_height) {
++  const double scale = g.ready ? std::clamp(REXCVAR_GET(vr_dlss_output_scale), 1.0, 3.0) : 1.0;
++  output_width = std::max(width, uint32_t(double(width) * scale + 0.5) & ~1u);
++  output_height = std::max(height, uint32_t(double(height) * scale + 0.5) & ~1u);
++}
++
++namespace {
++
 +// Images replaced at a size change, destroyed 16 frames on (the submissions in flight are done with them by then; a
 +// device wait here, on the submission thread, would race the headset thread's queue).
 +struct Retired {
@@ -3972,7 +3991,10 @@ index 0000000..b15e8bc
 +  if (!retired.empty()) {
 +    DestroyRetired(frame);
 +  }
-+  if (eye.depth.image && eye.depth.width == width && eye.depth.height == height) {
++  uint32_t output_width, output_height;
++  OutputSize(width, height, output_width, output_height);
++  if (eye.depth.image && eye.depth.width == width && eye.depth.height == height && eye.output.width == output_width &&
++      eye.output.height == output_height) {
 +    return true;
 +  }
 +  for (Image* image : {&eye.depth, &eye.motion, &eye.input, &eye.output}) {
@@ -3988,7 +4010,7 @@ index 0000000..b15e8bc
 +         MakeImage(eye.motion, VK_FORMAT_R16G16_SFLOAT, width, height, sampled_storage) &&
 +         MakeImage(eye.input, VK_FORMAT_R16G16B16A16_SFLOAT, width, height,
 +                   sampled_storage | VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
-+         MakeImage(eye.output, VK_FORMAT_R16G16B16A16_SFLOAT, width, height,  // DLSS clears it at a reset
++         MakeImage(eye.output, VK_FORMAT_R16G16B16A16_SFLOAT, output_width, output_height,  // cleared at a reset
 +                   sampled_storage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 +}
 +
@@ -4327,8 +4349,12 @@ index 0000000..b15e8bc
 +  eye.depth_ready = true;
 +}
 +
-+bool ApplyInPlace(VkCommandBuffer cmd, VkImage image, VkImageLayout layout, uint32_t width, uint32_t height,
-+                  bool fill_column, bool fill_row) {
++namespace {
++
++// The eye's scene (`image`, in TRANSFER_SRC_OPTIMAL) through DLSS into the eye's output image (left in
++// TRANSFER_SRC_OPTIMAL); false (nothing changed) without this frame's depth and motion.
++bool EvaluateEye(VkCommandBuffer cmd, VkImage image, uint32_t width, uint32_t height, bool fill_column,
++                 bool fill_row) {
 +  const int index = ReplayEye();
 +  Eye& eye = eyes[index];
 +  if (!g.ready || !eye.depth_ready || eye.depth.width != width || eye.depth.height != height) {
@@ -4339,22 +4365,25 @@ index 0000000..b15e8bc
 +  if (!eye.feature) {
 +    g.api->SelectFeature(uint32_t(index));
 +    BbDlssFeature feature{};
-+    feature.input_width = feature.output_width = width;
-+    feature.input_height = feature.output_height = height;
-+    feature.quality = 0;  // DLAA
++    feature.input_width = width;
++    feature.input_height = height;
++    feature.output_width = eye.output.width;
++    feature.output_height = eye.output.height;
++    // DLAA at the render size; else the mode nearest the scale (Quality 1.5x, Balanced 1.72x, Performance 2x).
++    const double scale = double(eye.output.width) / double(width);
++    feature.quality = scale < 1.01 ? 0 : scale < 1.6 ? 1 : scale < 1.86 ? 2 : 3;
 +    if (!g.api->CreateFeature(cmd, &feature)) {
 +      REXLOG_WARN("VR DLSS: the eye's feature could not be made");
 +      return false;
 +    }
 +    eye.feature = true;
-+    REXLOG_INFO("VR DLSS: eye {} feature, DLAA {}x{}", index, width, height);
++    REXLOG_INFO("VR DLSS: eye {} feature, {}x{} -> {}x{} (quality {})", index, width, height, eye.output.width,
++                eye.output.height, feature.quality);
 +  }
-+  // The scene into DLSS's input (its own format), DLSS, the result back over the scene.
++  // The scene into DLSS's input (its own format).
 +  VkImageBlit blit{};
 +  blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 +  blit.srcOffsets[1] = blit.dstOffsets[1] = {int32_t(width), int32_t(height), 1};
-+  Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
 +  Barrier(cmd, eye.input.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 +          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
 +  // With the unwritten first row / column filled from the next (DLSS would blend them in).
@@ -4416,15 +4445,35 @@ index 0000000..b15e8bc
 +    REXLOG_INFO("VR DLSS: first evaluation {} (jitter {} {} px)", ok ? "done" : "failed", eye.jitter_x, eye.jitter_y);
 +  }
 +  if (!ok) {
-+    Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout,
-+            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT);
 +    return false;
 +  }
 +  Barrier(cmd, eye.output.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL,
 +          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
++  return true;
++}
++
++}  // namespace
++
++bool ApplyInPlace(VkCommandBuffer cmd, VkImage image, VkImageLayout layout, uint32_t width, uint32_t height,
++                  bool fill_column, bool fill_row) {
++  const Eye& eye = eyes[ReplayEye()];
++  if (!g.ready || !eye.depth_ready || eye.output.width != width || eye.output.height != height) {
++    return false;  // (an upscale goes through UpscaleInto)
++  }
++  Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
++  if (!EvaluateEye(cmd, image, width, height, fill_column, fill_row)) {
++    Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout,
++            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT);
++    return false;
++  }
++  // The result back over the scene.
++  VkImageBlit blit{};
++  blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++  blit.srcOffsets[1] = blit.dstOffsets[1] = {int32_t(width), int32_t(height), 1};
 +  Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 +          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-+  d.vkCmdBlitImage(cmd, eye.output.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
++  d.vkCmdBlitImage(cmd, eyes[ReplayEye()].output.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
 +                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
 +  Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layout,
 +          VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -4432,13 +4481,30 @@ index 0000000..b15e8bc
 +  return true;
 +}
 +
++bool UpscaleInto(VkCommandBuffer cmd, VkImage image, uint32_t width, uint32_t height, bool fill_column,
++                 bool fill_row, VkImage target, int32_t target_x, uint32_t target_width, uint32_t target_height) {
++  const Eye& eye = eyes[ReplayEye()];
++  if (eye.output.width != target_width || eye.output.height != target_height ||
++      !EvaluateEye(cmd, image, width, height, fill_column, fill_row)) {
++    return false;
++  }
++  VkImageBlit blit{};
++  blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++  blit.srcOffsets[1] = {int32_t(target_width), int32_t(target_height), 1};
++  blit.dstOffsets[0] = {target_x, 0, 0};
++  blit.dstOffsets[1] = {target_x + int32_t(target_width), int32_t(target_height), 1};
++  d.vkCmdBlitImage(cmd, eyes[ReplayEye()].output.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
++                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
++  return true;
++}
++
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..bdd6269
+index 0000000..c43488d
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1599 @@
+@@ -0,0 +1,1616 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -4650,6 +4716,7 @@ index 0000000..bdd6269
 +    bool hud = false;    // split: the HUD in hud_screen_images[screen], the scene alone in the screen
 +    float pose[16]{}, tangents[4]{};
 +    uint32_t screen = 0, width = 0, height = 0;
++    uint32_t out_width = 0, out_height = 0;  // an eye in the headset's swapchain (dlss::OutputSize)
 +    uint64_t tick = 0;
 +    uint64_t serial = 0;
 +  };
@@ -5043,7 +5110,7 @@ index 0000000..bdd6269
 +}
 +
 +// The GPU thread: the screen images at the frame's size (the UNORM twin of the swapchain format), and the HUD's.
-+bool MakeScreens(uint32_t width, uint32_t height) {
++bool MakeScreens(uint32_t width, uint32_t height, uint32_t hud_width, uint32_t hud_height) {
 +  if (g.screen_images[0] && g.screen_width == width && g.screen_height == height) {
 +    return true;
 +  }
@@ -5064,7 +5131,6 @@ index 0000000..bdd6269
 +      g.hud_screen_memory[i] = {};
 +    }
 +  }
-+  const uint32_t eye_width = width / (Stereo() ? 2 : 1);
 +  if (g.hud_fixed) {
 +    g.vk.vkDestroyImageView(g.device, g.hud_fixed_view, nullptr);
 +    g.vk.vkDestroyImage(g.device, g.hud_fixed, nullptr);
@@ -5072,14 +5138,14 @@ index 0000000..bdd6269
 +    g.hud_fixed = {};
 +  }
 +  if (!MakeHudPipeline() ||
-+      !MakeTransferImage(eye_width, height, g.hud_fixed, g.hud_fixed_memory, VK_FORMAT_R8G8B8A8_UNORM,
++      !MakeTransferImage(hud_width, hud_height, g.hud_fixed, g.hud_fixed_memory, VK_FORMAT_R8G8B8A8_UNORM,
 +                         VK_IMAGE_USAGE_STORAGE_BIT)) {
 +    return false;
 +  }
 +  g.hud_fixed_view = MakeView(g.hud_fixed, VK_FORMAT_R8G8B8A8_UNORM);
 +  for (uint32_t i = 0; i < State::kScreens; ++i) {
 +    if (!MakeTransferImage(width, height, g.screen_images[i], g.screen_memory[i]) ||
-+        !MakeTransferImage(eye_width, height, g.hud_screen_images[i], g.hud_screen_memory[i],
++        !MakeTransferImage(hud_width, hud_height, g.hud_screen_images[i], g.hud_screen_memory[i],
 +                           VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT)) {
 +      return false;
 +    }
@@ -5286,8 +5352,8 @@ index 0000000..bdd6269
 +
 +// The headset's thread: a new publication into the screen's swapchain.
 +bool Show(const State::Published& p) {
-+  const uint32_t width = p.width * (Stereo() ? 2 : 1);  // stereo: the eyes side by side
-+  if ((g.width != width || g.height != p.height || !g.swapchain) && !CreateSwapchain(width, p.height)) {
++  const uint32_t width = p.out_width * (Stereo() ? 2 : 1);  // stereo: the eyes side by side
++  if ((g.width != width || g.height != p.out_height || !g.swapchain) && !CreateSwapchain(width, p.out_height)) {
 +    return false;
 +  }
 +  uint32_t index = 0;
@@ -5757,7 +5823,9 @@ index 0000000..bdd6269
 +      return -1;
 +    }
 +  }
-+  if (!MakeScreens(width * (Stereo() ? 2 : 1), height)) {
++  uint32_t out_width = width, out_height = height;
++  dlss::OutputSize(width, height, out_width, out_height);
++  if (!MakeScreens(out_width * (Stereo() ? 2 : 1), out_height, width, height)) {
 +    return -1;
 +  }
 +  g.split_screen = int(g.screen_next);
@@ -5768,8 +5836,10 @@ index 0000000..bdd6269
 +void HudCaptured() { g.split_hud_captured = true; }
 +
 +int BeginFrame(uint32_t width, uint32_t height) {
++  uint32_t out_width = width, out_height = height;
++  dlss::OutputSize(width, height, out_width, out_height);
 +  if (!g.session || g.format == VK_FORMAT_UNDEFINED || !width || !height ||
-+      !MakeScreens(width * (Stereo() ? 2 : 1), height)) {
++      !MakeScreens(out_width * (Stereo() ? 2 : 1), out_height, width, height)) {
 +    g.split_screen = -1;
 +    return -1;
 +  }
@@ -5788,6 +5858,8 @@ index 0000000..bdd6269
 +  g.pending.screen = index;
 +  g.pending.width = width;
 +  g.pending.height = height;
++  g.pending.out_width = out_width;
++  g.pending.out_height = out_height;
 +  return split ? -2 - int(index) : int(index);  // split (-2 - screen): the scene and the HUD are already copied
 +}
 +
@@ -5838,12 +5910,13 @@ index 0000000..bdd6269
 +      h = std::max(-g.head_tangents[0], g.head_tangents[1]);
 +      v = std::max(g.head_tangents[2], -g.head_tangents[3]);
 +    }
-+    const uint32_t rows = std::min(
-+        height, uint32_t(float(height) * (h / std::max(v, 1e-3f)) * g.hud_aspect.load(std::memory_order_relaxed)));
++    const uint32_t screen_width = g.screen_width / (Stereo() ? 2 : 1), screen_height = g.screen_height;
++    const uint32_t rows = std::min(screen_height, uint32_t(float(screen_height) * (h / std::max(v, 1e-3f)) *
++                                                           g.hud_aspect.load(std::memory_order_relaxed)));
 +    VkImageBlit blit{};
 +    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-+    blit.srcOffsets[0] = {0, int32_t((height - rows) / 2), 0};
-+    blit.srcOffsets[1] = {int32_t(width), int32_t((height + rows) / 2), 1};
++    blit.srcOffsets[0] = {0, int32_t((screen_height - rows) / 2), 0};
++    blit.srcOffsets[1] = {int32_t(screen_width), int32_t((screen_height + rows) / 2), 1};
 +    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 +    blit.dstOffsets[1] = {int32_t(width), int32_t(height), 1};
 +    g.vk.vkCmdBlitImage(cmd, scene, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -5887,15 +5960,25 @@ index 0000000..bdd6269
 +          VK_ACCESS_TRANSFER_READ_BIT);
 +  Barrier(cmd, target, eye ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
 +          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, eye ? VK_ACCESS_TRANSFER_READ_BIT : 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-+  VkImageBlit blit{};
-+  blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-+  blit.srcOffsets[1] = {int32_t(width), int32_t(height), 1};
-+  blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-+  blit.dstOffsets[0] = {int32_t(eye * width), 0, 0};
-+  blit.dstOffsets[1] = {int32_t((eye + 1) * width), int32_t(height), 1};
-+  g.vk.vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-+                      1, &blit, VK_FILTER_NEAREST);
-+  BlitEdges(cmd, image, target, int32_t(eye * width), width, height, fill_column, fill_row);
++  // The eye's half at the output size: DLSS's upscale into it, or (no DLSS this frame) the picture scaled up, its
++  // unwritten first row / column left out.
++  const uint32_t out_width = g.screen_width / (Stereo() ? 2 : 1), out_height = g.screen_height;
++  const bool scaled = out_width != width || out_height != height;
++  if (!scaled || !dlss::UpscaleInto(cmd, image, width, height, fill_column, fill_row, target,
++                                    int32_t(eye * out_width), out_width, out_height)) {
++    VkImageBlit blit{};
++    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    blit.srcOffsets[0] = {scaled && fill_column ? 1 : 0, scaled && fill_row ? 1 : 0, 0};
++    blit.srcOffsets[1] = {int32_t(width), int32_t(height), 1};
++    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    blit.dstOffsets[0] = {int32_t(eye * out_width), 0, 0};
++    blit.dstOffsets[1] = {int32_t((eye + 1) * out_width), int32_t(out_height), 1};
++    g.vk.vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
++                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, scaled ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
++    if (!scaled) {
++      BlitEdges(cmd, image, target, int32_t(eye * width), width, height, fill_column, fill_row);
++    }
++  }
 +  Barrier(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 +          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
 +  Barrier(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout, VK_ACCESS_TRANSFER_READ_BIT,

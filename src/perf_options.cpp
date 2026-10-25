@@ -299,7 +299,8 @@ void TickAbTest() {
 //
 // In VR (MCLA_VR=1): twice the vertical resolution (1280x1440 an eye: about square pixels over the headset's square
 // field of view), no motion blur or depth of field (both blur head turns; the eye focuses for itself), and DLSS's
-// anti-aliasing (DLAA) in place of the game's MSAA when DLSS starts (smoother edges, ~4 FPS faster).
+// anti-aliasing in place of the game's MSAA when DLSS starts, its output upscaled 1.5x to the headset (1920x2160 an
+// eye: sharper on a high-resolution headset, ~0.4 ms; vr_dlss_output_scale=1 keeps DLAA at the render size).
 // VR: --vr=true, or MCLA_VR=1.
 bool VrRequested() {
   const char* v = std::getenv("MCLA_VR");
@@ -316,8 +317,9 @@ void MclaConfigureGpuDefaults() {
     defaults.insert(defaults.end(), {{"draw_resolution_scale_y", "2"},
                                      {"mcla_motion_blur", "false"},
                                      {"mcla_depth_of_field", "false"},
-                                     {"vr_dlss", "true"}});
-    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field, DLSS (unless set)");
+                                     {"vr_dlss", "true"},
+                                     {"vr_dlss_output_scale", "1.5"}});
+    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field, DLSS to 1.5x (unless set)");
   }
   for (const auto& [name, value] : defaults) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
