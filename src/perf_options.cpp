@@ -299,23 +299,30 @@ void TickAbTest() {
 //
 // In VR (MCLA_VR=1): twice the vertical resolution (1280x1440 an eye: about square pixels over the headset's square
 // field of view), and no motion blur or depth of field (both blur head turns; the eye focuses for itself).
+// VR: --vr=true (or in mcla.toml), or MCLA_VR=1.
+bool VrRequested() {
+  const char* v = std::getenv("MCLA_VR");
+  return (v && v[0] == '1') || rex::cvar::Query<bool>("vr");
+}
+
 void MclaConfigureGpuDefaults() {
   std::vector<std::pair<const char*, const char*>> defaults = {
       {"shared_memory_hot_page_faults", "2"},
       {"shared_memory_hot_page_exact", "0"},
       {"clear_memory_page_state", "false"},
   };
-  if (const char* vr = std::getenv("MCLA_VR"); vr && vr[0] == '1') {
+  if (VrRequested()) {
     defaults.insert(defaults.end(), {{"draw_resolution_scale_y", "2"},
                                      {"mcla_motion_blur", "false"},
                                      {"mcla_depth_of_field", "false"}});
+    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field (unless set)");
   }
   for (const auto& [name, value] : defaults) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName(name, value);
     }
   }
-  if (const char* vr = std::getenv("MCLA_VR"); vr && vr[0] == '1' && REXCVAR_GET(mcla_fps) != 0) {
+  if (VrRequested() && REXCVAR_GET(mcla_fps) != 0) {
     // VR paces the game at the headset's refresh rate itself; the game's limiter (30 by default) would hold it below.
     REXLOG_INFO("VR: the game's frame-rate target {} off (the headset paces it)", REXCVAR_GET(mcla_fps));
     rex::cvar::SetFlagByName("mcla_fps", "0");
