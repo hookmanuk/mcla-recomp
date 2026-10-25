@@ -4501,10 +4501,10 @@ index 0000000..7fcbabd
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..c43488d
+index 0000000..32f5f25
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1616 @@
+@@ -0,0 +1,1634 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -4765,6 +4765,8 @@ index 0000000..c43488d
 +  // Frame statistics.
 +  std::vector<double> intervals;
 +  double last_submit = 0.0;
++  std::vector<double> display_intervals;  // between the display times of submitted frames (a skipped one: two periods)
++  int64_t last_display = 0;
 +  uint32_t repeats = 0;
 +  std::atomic<uint32_t> count_frames{0};
 +
@@ -5288,6 +5290,10 @@ index 0000000..c43488d
 +    g.intervals.push_back(t - g.last_submit);
 +  }
 +  g.last_submit = t;
++  if (g.last_display) {
++    g.display_intervals.push_back(double(g.frame_state.predictedDisplayTime - g.last_display) * 1e-9);
++  }
++  g.last_display = g.frame_state.predictedDisplayTime;
 +  if (g.intervals.size() < 900) {
 +    return;
 +  }
@@ -5302,6 +5308,16 @@ index 0000000..c43488d
 +  }
 +  std::sort(g.intervals.begin(), g.intervals.end());
 +  const double p99 = g.intervals[g.intervals.size() * 99 / 100];
++  // What the headset shows: display slots without a submitted frame (the runtime repeats one).
++  uint32_t skipped = 0;
++  double display_sum = 0.0;
++  for (const double i : g.display_intervals) {
++    display_sum += i;
++    skipped += uint32_t(std::max(0.0, std::round(i / period) - 1.0));
++  }
++  std::sort(g.display_intervals.begin(), g.display_intervals.end());
++  const double display_p99 =
++      g.display_intervals.empty() ? period : g.display_intervals[g.display_intervals.size() * 99 / 100];
 +  const double new_frames = double(g.intervals.size() - std::min<size_t>(g.repeats, g.intervals.size()));
 +  {
 +    uint64_t value = 0;
@@ -5312,11 +5328,13 @@ index 0000000..c43488d
 +        (unsigned long long)g.shown_serial);
 +  }
 +  Log("game %.1f FPS (new frames), recorded %.1f; headset %.1f FPS, 1%% low %.1f FPS, over a period %.2f%%, late "
-+      "%.2f%% (display %.1f Hz)%s",
++      "%.2f%% (display %.1f Hz)%s; displayed: 1%% low %.1f FPS, %u of %zu slots skipped (submit jitter is the "
++      "first 1%% low)",
 +      new_frames / sum, g.count_frames.exchange(0) / sum, double(g.intervals.size()) / sum, 1.0 / p99,
 +      100.0 * over / double(g.intervals.size()), 100.0 * late / double(g.intervals.size()), 1.0 / period,
-+      g.capped ? ", capped" : "");
++      g.capped ? ", capped" : "", 1.0 / display_p99, skipped, g.display_intervals.size() + skipped);
 +  g.intervals.clear();
++  g.display_intervals.clear();
 +  g.repeats = 0;
 +}
 +
