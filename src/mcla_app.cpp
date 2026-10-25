@@ -56,10 +56,10 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
       REXLOG_ERROR("could not load the xenos GPU plugin with backend '{}'", backend);
     }
   }
+  MclaConfigureGpuDefaults();  // the GPU plugin's cvars exist from here, and the GPU is not started yet
 }
 
 void MclaApp::OnPostSetup() {
-  MclaConfigureGpuDefaults();  // the GPU plugin's cvars exist from here
   ConfigureFrameTiming();
 
 

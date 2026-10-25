@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -293,10 +294,21 @@ void TickAbTest() {
 // Free roam, stereo VR: 63 -> 78 FPS parked, frame 14.5 -> 13.0 ms driving. The page state is kept from frame to
 // frame (clear_memory_page_state off, as the PS5 port does): otherwise every page in use is copied again each frame
 // (1.6 GB/s -> 69 MB/s; stereo VR 80 -> 98 FPS parked). Values given on the command line win.
+//
+// In VR (MCLA_VR=1): twice the vertical resolution (1280x1440 an eye: about square pixels over the headset's square
+// field of view), and no motion blur or depth of field (both blur head turns; the eye focuses for itself).
 void MclaConfigureGpuDefaults() {
-  for (const auto& [name, value] : {std::pair<const char*, const char*>{"shared_memory_hot_page_faults", "2"},
-                                    std::pair<const char*, const char*>{"shared_memory_hot_page_exact", "0"},
-                                    std::pair<const char*, const char*>{"clear_memory_page_state", "false"}}) {
+  std::vector<std::pair<const char*, const char*>> defaults = {
+      {"shared_memory_hot_page_faults", "2"},
+      {"shared_memory_hot_page_exact", "0"},
+      {"clear_memory_page_state", "false"},
+  };
+  if (const char* vr = std::getenv("MCLA_VR"); vr && vr[0] == '1') {
+    defaults.insert(defaults.end(), {{"draw_resolution_scale_y", "2"},
+                                     {"mcla_motion_blur", "false"},
+                                     {"mcla_depth_of_field", "false"}});
+  }
+  for (const auto& [name, value] : defaults) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName(name, value);
     }
