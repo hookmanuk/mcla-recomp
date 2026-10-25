@@ -24,6 +24,8 @@
 #include <rex/runtime.h>
 #include <rex/system/xmemory.h>
 
+REXCVAR_DECLARE(int32_t, mcla_fps);  // frame_timing.cpp
+
 REXCVAR_DEFINE_BOOL(mcla_shadows, true, "MCLA", "Real-time shadows. Off is the largest saving");
 REXCVAR_DEFINE_BOOL(mcla_race_shadows, true, "MCLA",
                     "Shadows during races (applies at the next start of the game)");
@@ -312,6 +314,11 @@ void MclaConfigureGpuDefaults() {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName(name, value);
     }
+  }
+  if (const char* vr = std::getenv("MCLA_VR"); vr && vr[0] == '1' && REXCVAR_GET(mcla_fps) != 0) {
+    // VR paces the game at the headset's refresh rate itself; the game's limiter (30 by default) would hold it below.
+    REXLOG_INFO("VR: the game's frame-rate target {} off (the headset paces it)", REXCVAR_GET(mcla_fps));
+    rex::cvar::SetFlagByName("mcla_fps", "0");
   }
 }
 
