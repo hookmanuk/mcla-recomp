@@ -87,6 +87,12 @@ std::vector<uint32_t> OtherThreadIds() {
 
 void RunProfile(std::string path, int delay_s, int seconds) {
   Sleep(static_cast<DWORD>(delay_s) * 1000);
+  // MCLA_PROFILE_TRIGGER=<file>: after the delay, sampling waits for the file to appear (a watcher's cue).
+  if (const char* trigger = std::getenv("MCLA_PROFILE_TRIGGER"); trigger && *trigger) {
+    while (GetFileAttributesA(trigger) == INVALID_FILE_ATTRIBUTES) {
+      Sleep(100);
+    }
+  }
 
   std::vector<std::pair<uint32_t, HANDLE>> threads;
   for (uint32_t id : OtherThreadIds()) {
