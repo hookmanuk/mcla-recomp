@@ -34,6 +34,17 @@ address = 0x822E4B80
 registers = ["r11"]
 jump_address_on_true = 0x822E4B84
 
+# 0x8217A470: sub_8217A470, the predicated tiling's begin, r6 = the
+# multisample mode. Its callers (sub_822E5ED8, sub_822E5358) raise it to 4x
+# on their own whenever renderer+373, +393 or +433 is set: about 15 frames in
+# every ~605 in free roam, so with MSAA off those frames still drew the scene
+# at 4x in three tiles (~3500 more draws, 12-16 ms frames). With MSAA off it
+# stays 1x.
+[[midasm_hook]]
+name = "mcla_tiling_msaa"
+address = 0x8217A470
+registers = ["r6"]
+
 # 0x823126A4: `bl sub_8230D988` in the sun-shadow phase of sub_823120C8, r3 =
 # the impostor manager. sub_8230D988 searches the impostor array round-robin
 # for an entry to refresh with no bound on the search, so with the impostors

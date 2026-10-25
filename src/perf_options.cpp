@@ -378,14 +378,24 @@ namespace rex::ui::vulkan::vr::dlss {
 bool Ready();  // rexglue vr_dlss
 }
 
-bool mcla_msaa(PPCRegister& r11) {
-  // In VR DLSS anti-aliases instead, when it runs and MSAA is not asked for.
+// MSAA off: asked for, or in VR when DLSS anti-aliases instead (it runs and MSAA is not asked for).
+bool MsaaOff() {
   static const bool vr_default = VrRequested() && rex::cvar::GetFlagSource("mcla_msaa") == rex::cvar::Source::kDefault;
-  if (REXCVAR_GET(mcla_msaa) && !(vr_default && rex::ui::vulkan::vr::dlss::Ready())) {
+  return !REXCVAR_GET(mcla_msaa) || (vr_default && rex::ui::vulkan::vr::dlss::Ready());
+}
+
+bool mcla_msaa(PPCRegister& r11) {
+  if (!MsaaOff()) {
     return false;
   }
   r11.u64 = 1;
   return true;
+}
+
+void mcla_tiling_msaa(PPCRegister& r6) {
+  if (r6.u32 > 1 && MsaaOff()) {
+    r6.u64 = 1;
+  }
 }
 
 bool mcla_impostor_search_guard(PPCRegister& r3) {
