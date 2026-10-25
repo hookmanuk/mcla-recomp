@@ -40,6 +40,7 @@ void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
 }
 
 void MclaConfigureGpuDefaults();  // perf_options.cpp
+bool VrRequested();               // perf_options.cpp
 
 void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   config.audio_factory = &CreateMclaAudioSystem;
@@ -50,6 +51,9 @@ void MclaApp::OnPreSetup(rex::RuntimeConfig& config) {
   // Left to the SDK when "any"; it then loads the plugin named by --gpu_plugin
   // with its own default backend.
   std::string backend = REXCVAR_GET(mcla_gpu_backend);
+  if (backend == "any" && VrRequested()) {
+    backend = "vulkan";  // VR runs on the Vulkan backend only
+  }
   if (backend != "any") {
     config.graphics = rex::system::LoadGpuPlugin("xenos", backend);
     if (!config.graphics) {

@@ -47,6 +47,8 @@ Options go after the program name, for example `mcla.exe --fullscreen=true --mcl
 
 **Update:** `git pull`, then `.\scripts\make_pc.ps1` again.
 
+**VR:** start an OpenXR runtime (SteamVR, for example), then `mcla.exe --vr=true`. Both eyes are rendered (1280x1440 each, on the Vulkan backend), the camera follows the head, the HUD is a flat panel in front of the seat, and F8 recentres the view. Motion blur and depth of field are off in VR. The desktop window is not updated while in VR: presenting to it, behind the headset's window, now and then stalled the game (`--vr_desktop_mirror=true` shows it anyway). The OpenXR loader is put next to `mcla.exe` by `make_pc.ps1`.
+
 | If | Then |
 |---|---|
 | The SDK build fails with `'crtversion.h' file not found` | Another Clang on your path was used. Update and run `make_pc.ps1` again: it now uses only its own. |

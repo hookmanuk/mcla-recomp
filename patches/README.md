@@ -8,6 +8,12 @@ git apply ../../patches/rexglue-minmax-blend-factor.patch
 git -C thirdparty/FFmpeg apply ../../../../patches/rexglue-ffmpeg-ps5-config.patch
 ```
 
+For VR (OpenXR, Windows), one more goes on top of those:
+
+```
+git apply ../../patches/rexglue-vr.patch
+```
+
 On Linux, two more go on top, from the same folder:
 
 ```
@@ -42,3 +48,18 @@ Host render target path only (the default on both backends).
 ## rexglue-ffmpeg-ps5-config.patch
 
 FFmpeg selects a configuration header per platform. This adds `config_ps5_x86_64.h`, generated from the Linux x86-64 one with `HAVE_MALLOC_H`, `CONFIG_ICONV`, `HAVE_MEMALIGN`, `HAVE_SCHED_GETAFFINITY` and `HAVE_LINUX_PERF_EVENT_H` turned off, and selects it for `__PROSPERO__`.
+
+## rexglue-vr.patch
+
+VR on the Vulkan backend through OpenXR, turned on by `--vr=true` (or `MCLA_VR=1`); without it nothing changes. The
+game's side (the head-posed camera, the VR defaults) is in `src/vr_camera.cpp` and `src/perf_options.cpp`.
+
+| Change | Files |
+|---|---|
+| OpenXR session, headset frame loop and pacing, the HUD on its own layer, recentring (F8) | `src/ui/vulkan/vr_openxr.cpp`, `include/rex/ui/vulkan/vr_openxr.h`, `src/ui/vulkan/shaders/vr_hud_alpha.*`, `thirdparty/openxr` (Khronos headers) |
+| Stereo: each submission replayed for the right eye on twins of the GPU's resources, a clip-space eye shift for perspective draws, pixel-shader textures pushed per draw | `src/ui/vulkan/vr_twins.cpp`, `include/rex/ui/vulkan/vr_twins.h`, `src/graphics/vulkan/deferred_command_buffer.*`, `src/graphics/vulkan/command_processor.cpp` |
+| Which draws, render targets and resolved pages differ per eye | `src/graphics/vulkan/command_processor.cpp`, `src/graphics/vulkan/texture_cache.cpp`, `src/graphics/shared_memory.cpp` |
+| GPU thread cost: submissions on their own thread, uploads hoisted to a submission's prologue, hot pages uploaded only when changed, dynamic constant buffers in VR | `src/graphics/vulkan/command_processor.cpp`, `src/graphics/shared_memory.cpp`, `src/graphics/vulkan/shared_memory.cpp` |
+| No desktop window presents in VR unless `vr_desktop_mirror=true` (a windowed present behind the headset's window now and then stalled the GPU queue) | `src/ui/vulkan/vulkan_presenter.cpp` |
+
+The OpenXR loader (`openxr_loader.dll`, Khronos 1.1.63) goes beside `mcla.exe`; `scripts/make_pc.ps1` fetches it.

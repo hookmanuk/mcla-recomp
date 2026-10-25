@@ -160,6 +160,11 @@ try {
         Patch "sdk-patch-reflection" $sdk "$root\patches\rexglue-minmax-blend-factor.patch"
         (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
     }
+    # VR (OpenXR) came later still: the same way.
+    if (-not (Test-Path "$sdk\src\ui\vulkan\vr_openxr.cpp")) {
+        Patch "sdk-patch-vr" $sdk "$root\patches\rexglue-vr.patch"
+        (Get-Item "$sdk\.mcla-patched" -Force).LastWriteTime = Get-Date
+    }
 
     # -----------------------------------------------------------------------
     Step "3/6 build and install the SDK (the long step, once)"
@@ -198,6 +203,21 @@ try {
     $build = "$root\out\build\$Preset"
     if (-not (Test-Path "$build\mcla.exe")) { Fail "mcla.exe was not built (log: $root\out\build.log)" }
     Copy-Item "$install\bin\rexgpu-xenos.dll" $build -Force
+    # VR: the OpenXR loader beside the game (Khronos's release build; mcla.exe
+    # loads it only with --vr=true).
+    if (-not (Test-Path "$build\openxr_loader.dll")) {
+        $zip = "$root\tools\openxr_loader_windows-1.1.63.zip"
+        if (-not (Test-Path $zip)) {
+            Logged "openxr-download" { Invoke-WebRequest -UseBasicParsing -OutFile $zip -Uri "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-1.1.63/openxr_loader_windows-1.1.63.zip" }
+        }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            $entry = $archive.Entries | Where-Object { $_.FullName -eq "x64/bin/openxr_loader.dll" }
+            if (-not $entry) { Fail "no x64/bin/openxr_loader.dll in $zip" }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "$build\openxr_loader.dll", $true)
+        } finally { $archive.Dispose() }
+    }
 
     # -----------------------------------------------------------------------
     Step "6/6 done"

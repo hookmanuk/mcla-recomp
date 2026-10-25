@@ -299,7 +299,7 @@ void TickAbTest() {
 //
 // In VR (MCLA_VR=1): twice the vertical resolution (1280x1440 an eye: about square pixels over the headset's square
 // field of view), and no motion blur or depth of field (both blur head turns; the eye focuses for itself).
-// VR: --vr=true (or in mcla.toml), or MCLA_VR=1.
+// VR: --vr=true, or MCLA_VR=1.
 bool VrRequested() {
   const char* v = std::getenv("MCLA_VR");
   return (v && v[0] == '1') || rex::cvar::Query<bool>("vr");
