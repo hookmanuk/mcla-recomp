@@ -298,7 +298,8 @@ void TickAbTest() {
 // (1.6 GB/s -> 69 MB/s; stereo VR 80 -> 98 FPS parked). Values given on the command line win.
 //
 // In VR (MCLA_VR=1): twice the vertical resolution (1280x1440 an eye: about square pixels over the headset's square
-// field of view), and no motion blur or depth of field (both blur head turns; the eye focuses for itself).
+// field of view), no motion blur or depth of field (both blur head turns; the eye focuses for itself), and DLSS's
+// anti-aliasing (DLAA) in place of the game's MSAA when DLSS starts (smoother edges, ~4 FPS faster).
 // VR: --vr=true, or MCLA_VR=1.
 bool VrRequested() {
   const char* v = std::getenv("MCLA_VR");
@@ -314,8 +315,9 @@ void MclaConfigureGpuDefaults() {
   if (VrRequested()) {
     defaults.insert(defaults.end(), {{"draw_resolution_scale_y", "2"},
                                      {"mcla_motion_blur", "false"},
-                                     {"mcla_depth_of_field", "false"}});
-    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field (unless set)");
+                                     {"mcla_depth_of_field", "false"},
+                                     {"vr_dlss", "true"}});
+    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field, DLSS (unless set)");
   }
   for (const auto& [name, value] : defaults) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
@@ -372,8 +374,14 @@ bool mcla_foliage_shadows(PPCRegister& r11) {
   return true;
 }
 
+namespace rex::ui::vulkan::vr::dlss {
+bool Ready();  // rexglue vr_dlss
+}
+
 bool mcla_msaa(PPCRegister& r11) {
-  if (REXCVAR_GET(mcla_msaa)) {
+  // In VR DLSS anti-aliases instead, when it runs and MSAA is not asked for.
+  static const bool vr_default = VrRequested() && rex::cvar::GetFlagSource("mcla_msaa") == rex::cvar::Source::kDefault;
+  if (REXCVAR_GET(mcla_msaa) && !(vr_default && rex::ui::vulkan::vr::dlss::Ready())) {
     return false;
   }
   r11.u64 = 1;
