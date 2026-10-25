@@ -11,6 +11,7 @@
 
 #include "mcla_app.h"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -143,6 +144,40 @@ void RunProfile(std::string path, int delay_s, int seconds) {
     ++rounds;
     Sleep(1);
   }
+  // MCLA_PROFILE_STACKS=1: each thread's whole stack once at the end (x64 unwind), for hangs.
+  static const bool stacks_wanted = std::getenv("MCLA_PROFILE_STACKS") != nullptr;
+  constexpr int kStackFrames = 48;
+  std::vector<std::pair<uint32_t, std::array<uint64_t, kStackFrames>>> stacks;
+  if (stacks_wanted) {
+    stacks.resize(threads.size());
+    for (size_t t = 0; t < threads.size(); ++t) {
+      auto& [id, handle] = threads[t];
+      stacks[t].first = id;
+      stacks[t].second.fill(0);
+      if (SuspendThread(handle) == static_cast<DWORD>(-1)) {
+        continue;
+      }
+      CONTEXT context;
+      context.ContextFlags = CONTEXT_FULL;
+      if (GetThreadContext(handle, &context)) {
+        for (int frame = 0; frame < kStackFrames && context.Rip; ++frame) {
+          stacks[t].second[frame] = context.Rip;
+          DWORD64 image_base = 0;
+          PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+          if (!function) {  // a leaf: the return address is at the stack pointer
+            context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
+            context.Rsp += 8;
+          } else {
+            PVOID handler_data = nullptr;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function, &context, &handler_data,
+                             &establisher, nullptr);
+          }
+        }
+      }
+      ResumeThread(handle);
+    }
+  }
   for (auto& [id, handle] : threads) {
     CloseHandle(handle);
   }
@@ -195,6 +230,27 @@ void RunProfile(std::string path, int delay_s, int seconds) {
                  static_cast<unsigned long long>(rounds), seconds, threads.size(), count);
     for (const auto& [key, n] : hits) {
       std::fprintf(f, "%u\t%u\t%s\n", key.first, n, key.second.c_str());
+    }
+    for (const auto& [id, frames] : stacks) {
+      std::fprintf(f, "# stack %u:", id);
+      for (uint64_t pc : frames) {
+        if (!pc) {
+          break;
+        }
+        HMODULE module = nullptr;
+        char name[MAX_PATH] = "?";
+        uint64_t base = 0;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(pc), &module) &&
+            module) {
+          GetModuleFileNameA(module, name, sizeof name);
+          base = reinterpret_cast<uint64_t>(module);
+        }
+        const char* short_name = std::strrchr(name, '\\');
+        std::fprintf(f, " %s+0x%llX", short_name ? short_name + 1 : name,
+                     static_cast<unsigned long long>(pc - base));
+      }
+      std::fprintf(f, "\n");
     }
     std::fclose(f);
   }
