@@ -218,6 +218,48 @@ try {
             [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "$build\openxr_loader.dll", $true)
         } finally { $archive.Dispose() }
     }
+    # VR: DLSS (NVIDIA RTX). The bridge in dlss_bridge\ (MIT, from the Driveclub
+    # port) is built against NVIDIA's DLSS SDK (only the files it needs, from the
+    # SDK's v310.9.1 tag) with MSVC, and put beside mcla.exe with NVIDIA's
+    # library and both licences. mcla.exe loads them only in VR; without them
+    # (or on another GPU) the game keeps its own MSAA.
+    if (-not (Test-Path "$build\bbport_dlss.dll") -or -not (Test-Path "$build\nvngx_dlss.dll")) {
+        $dlss = "$root\tools\dlss-sdk-310.9.1"
+        $headers = @("nvsdk_ngx.h", "nvsdk_ngx_defs.h", "nvsdk_ngx_defs_dlssd.h", "nvsdk_ngx_defs_dlssg.h",
+            "nvsdk_ngx_defs_vk.h", "nvsdk_ngx_helpers.h", "nvsdk_ngx_helpers_cuda.h", "nvsdk_ngx_helpers_d3d.h",
+            "nvsdk_ngx_helpers_dlssd.h", "nvsdk_ngx_helpers_dlssd_cuda.h", "nvsdk_ngx_helpers_dlssd_d3d.h",
+            "nvsdk_ngx_helpers_dlssd_vk.h", "nvsdk_ngx_helpers_dlssg.h", "nvsdk_ngx_helpers_dlssg_d3d.h",
+            "nvsdk_ngx_helpers_dlssg_vk.h", "nvsdk_ngx_helpers_vk.h", "nvsdk_ngx_loader.h", "nvsdk_ngx_params.h",
+            "nvsdk_ngx_params_dlssd.h", "nvsdk_ngx_params_dlssg.h", "nvsdk_ngx_standalone_common.h",
+            "nvsdk_ngx_standalone_cuda.h", "nvsdk_ngx_vk.h")
+        $files = @("LICENSE.txt", "lib/Windows_x86_64/rel/nvngx_dlss.dll", "lib/Windows_x86_64/x64/nvsdk_ngx_s.lib") +
+            ($headers | ForEach-Object { "include/$_" })
+        foreach ($file in $files) {
+            $dest = "$dlss\$($file.Replace('/', '\'))"
+            if (-not (Test-Path $dest)) {
+                New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
+                Logged "dlss-download" { Invoke-WebRequest -UseBasicParsing -OutFile "$dest.part" -Uri "https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.1/$file" }
+                Move-Item -Force "$dest.part" $dest
+            }
+        }
+        # The SDK's static library is MSVC's: the bridge is built in the Build
+        # Tools' environment (vcvars64), with MSVC's compiler.
+        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+        $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
+        if (-not (Test-Path $vcvars)) { Fail "no vcvars64.bat in the Build Tools ($vsPath)" }
+        $bridgeBuild = "$root\out\build\dlss-bridge"
+        $bridgeCmd = "$logs\dlss-bridge.cmd"
+        @(
+            "@call `"$vcvars`" >nul || exit /b 1",
+            "cmake -S `"$root\dlss_bridge`" -B `"$bridgeBuild`" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl `"-DDLSS_SDK_ROOT=$dlss`" `"-DVULKAN_INCLUDE=$sdk\thirdparty\vulkan-headers\include`" || exit /b 1",
+            "cmake --build `"$bridgeBuild`" || exit /b 1"
+        ) | Set-Content -Encoding Ascii $bridgeCmd
+        Logged "dlss-bridge" { cmd /c $bridgeCmd }
+        Copy-Item "$bridgeBuild\bbport_dlss.dll", "$dlss\lib\Windows_x86_64\rel\nvngx_dlss.dll" $build -Force
+        New-Item -ItemType Directory -Force "$build\licenses" | Out-Null
+        Copy-Item "$dlss\LICENSE.txt" "$build\licenses\NVIDIA-DLSS-LICENSE.txt" -Force
+        Copy-Item "$root\dlss_bridge\LICENSE.txt" "$build\licenses\dlss_bridge-LICENSE.txt" -Force
+    }
 
     # -----------------------------------------------------------------------
     Step "6/6 done"
