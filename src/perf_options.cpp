@@ -394,6 +394,17 @@ bool mcla_msaa(PPCRegister& r11) {
   return true;
 }
 
+void mcla_msaa_request(PPCRegister& r4) {
+  if (r4.u32 && MsaaOff()) {
+    r4.u64 = 0;
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      REXLOG_INFO("MSAA off: the game's multisample requests are held off");
+    }
+  }
+}
+
 void mcla_tiling_msaa(PPCRegister& r6) {
   if (r6.u32 > 1 && MsaaOff()) {
     r6.u64 = 1;

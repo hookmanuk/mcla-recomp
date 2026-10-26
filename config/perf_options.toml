@@ -45,6 +45,16 @@ name = "mcla_tiling_msaa"
 address = 0x8217A470
 registers = ["r6"]
 
+# 0x822E5B20: sub_822E5B20(renderer, on), the game's request for multisampling
+# (renderer+433, applied to +373 by sub_822E5B60 each frame). In free roam it
+# asks for it for ~15 frames in every ~425: the scene, its tiles and the HUD's
+# targets went 2x/4x for those frames (slow frames, the VR HUD split lost:
+# the HUD flickered). With MSAA off the request stays off.
+[[midasm_hook]]
+name = "mcla_msaa_request"
+address = 0x822E5B20
+registers = ["r4"]
+
 # 0x823126A4: `bl sub_8230D988` in the sun-shadow phase of sub_823120C8, r3 =
 # the impostor manager. sub_8230D988 searches the impostor array round-robin
 # for an entry to refresh with no bound on the search, so with the impostors

@@ -81,7 +81,7 @@ index de3fa66..0d93496 100644
    static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(
        void* context_ptr, uint32_t physical_address_start, uint32_t length, bool exact_range);
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..8af80d8 100644
+index 696ff48..60edc79 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -10,14 +10,18 @@
@@ -103,15 +103,17 @@ index 696ff48..8af80d8 100644
  #include <unordered_map>
  #include <utility>
  #include <vector>
-@@ -47,6 +51,29 @@ namespace rex::graphics::vulkan {
+@@ -47,6 +51,31 @@ namespace rex::graphics::vulkan {
  
  class VulkanCommandProcessor : public CommandProcessor {
   public:
 +  // VR fork, development: the frame VR_LOG_FRAME names (draw and resolve logs).
 +  bool VrLogThisFrame() const;
++  bool VrHeadTrackedProjection(const float* world, const float* world_view_projection) const;
 +  bool VrHudDraw(const Shader* vertex_shader);
 +  int VrScaledEdges() const;
 +  uint32_t vr_log_swap_count_ = 0;
++  bool vr_frame_scene_ = false;  // VR fork: the frame drew a head-tracked 3D scene (else on the screen, unposed)
 +  uint32_t vr_log_draw_index_ = 0;
 +  // VR fork: the HUD layer (ui::vulkan::vr::SplitFrame): the frame's split, its target, the last output's size.
 +  int vr_hud_screen_ = -1;
@@ -133,7 +135,7 @@ index 696ff48..8af80d8 100644
    // Single-descriptor layouts for use within a single frame.
    enum class SingleTransientDescriptorLayout {
      kStorageBufferCompute,
-@@ -501,6 +528,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -501,6 +530,7 @@ class VulkanCommandProcessor : public CommandProcessor {
    // Returns how many VkWriteDescriptorSet structure instances have been
    // written, or 0 if there was a failure to allocate the descriptor set or no
    // bindings were requested.
@@ -141,7 +143,7 @@ index 696ff48..8af80d8 100644
    uint32_t WriteTransientTextureBindings(bool is_vertex, uint32_t texture_count,
                                           uint32_t sampler_count,
                                           VkDescriptorSetLayout descriptor_set_layout,
-@@ -553,6 +581,52 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -553,6 +583,52 @@ class VulkanCommandProcessor : public CommandProcessor {
    std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
    DeferredCommandBuffer deferred_command_buffer_;
  
@@ -194,7 +196,7 @@ index 696ff48..8af80d8 100644
    std::vector<VkSparseMemoryBind> sparse_memory_binds_;
    std::vector<SparseBufferBind> sparse_buffer_binds_;
    // SparseBufferBind converted to VkSparseBufferMemoryBindInfo to this buffer
-@@ -566,6 +640,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -566,6 +642,7 @@ class VulkanCommandProcessor : public CommandProcessor {
    // Temporary storage with reusable memory for writing image and sampler
    // descriptors.
    std::vector<VkDescriptorImageInfo> descriptor_write_image_info_;
@@ -202,7 +204,7 @@ index 696ff48..8af80d8 100644
  
    std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
  
-@@ -598,6 +673,14 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -598,6 +675,14 @@ class VulkanCommandProcessor : public CommandProcessor {
    // <Usage frame, set>.
    std::deque<std::pair<uint64_t, VkDescriptorSet>> constants_transient_descriptors_used_;
    std::vector<VkDescriptorSet> constants_transient_descriptors_free_;
@@ -669,10 +671,10 @@ index 0000000..91d3fe9
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/include/rex/ui/vulkan/vr_openxr.h b/include/rex/ui/vulkan/vr_openxr.h
 new file mode 100644
-index 0000000..15f28ae
+index 0000000..151aed8
 --- /dev/null
 +++ b/include/rex/ui/vulkan/vr_openxr.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,113 @@
 +// VR fork: OpenXR for the Vulkan renderer (ported from the Driveclub recomp's and the Uncharted port's VR layer).
 +//
 +// On with MCLA_VR=1 when an OpenXR runtime answers (XR_RUNTIME_JSON picks one, e.g. the OpenXR Simulator). The
@@ -725,6 +727,9 @@ index 0000000..15f28ae
 +/// the frame was split, its scene and HUD already copied to that screen). The submission that holds the copy (RecordFrameCopy) takes the
 +/// frame's signal (TakeFrameSignal).
 +int BeginFrame(uint32_t width, uint32_t height);
++/// The GPU thread, before BeginFrame: whether the frame drew a 3D scene with the headset's field of view; one
++/// without (2D only, or a camera of the game's own) is shown on the screen, not at its pose.
++void SetFrameHasScene(bool has_scene);
 +
 +/// The GPU thread, at the first HUD draw of a posed frame: the screen its scene goes to (each eye's render target
 +/// copied there, kCopyScene) before the target is cleared for the HUD, whose picture goes to the frame's HUD image
@@ -1467,7 +1472,7 @@ index 47926fb..4997ce1 100644
        page_heat_decay_ms_ = now_ms;
        for (uint8_t& heat : page_heat_) {
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 53dcb7f..45c6b51 100644
+index 53dcb7f..2a334de 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -12,6 +12,12 @@
@@ -1882,7 +1887,7 @@ index 53dcb7f..45c6b51 100644
    AwaitAllQueueOperationsCompletion();
    InvalidateAllVertexBufferResidency();
    ShutdownOcclusionQueryResources();
-@@ -2295,11 +2604,173 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2295,11 +2604,207 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
    gamma_ramp_pwl_current_frame_ = UINT32_MAX;
  }
  
@@ -1933,6 +1938,9 @@ index 53dcb7f..45c6b51 100644
 +  if (vr_hud_screen_ >= 0) {
 +    return color0.color_base == vr_hud_base_ && surface.surface_pitch == vr_hud_pitch_;
 +  }
++  if (!vr_frame_scene_) {  // no head-tracked scene (a title screen): the frame whole, on the screen
++    return false;
++  }
 +  if (surface.msaa_samples != xenos::MsaaSamples::k1X || surface.surface_pitch != vr_output_width_) {
 +    return false;
 +  }
@@ -1957,6 +1965,37 @@ index 53dcb7f..45c6b51 100644
 +    std::memcpy(&w[i], &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (8 + i) * 4 + 3], sizeof(float));
 +  }
 +  return std::abs(w[0]) + std::abs(w[1]) + std::abs(w[2]) > 1e-4f || std::abs(w[3] - 1.f) > 1e-4f;
++}
++
++// VR fork: whether a scene draw's projection has the headset's field of view (the head-tracked main camera, not a
++// game camera of its own such as the title logo's): its y scale (VP = World^-1 x WVP, row vectors: the length of
++// VP's second column) against 1 / the headset's vertical tangent.
++bool VulkanCommandProcessor::VrHeadTrackedProjection(const float* world, const float* world_view_projection) const {
++  float pose[16], tangents[4];
++  if (!ui::vulkan::vr::HeadPose(pose, tangents)) {
++    return true;
++  }
++  const float v = std::max(tangents[2], -tangents[3]);
++  if (v <= 0.f) {
++    return true;
++  }
++  // The world's 3x3 inverse (adjugate over the determinant) times WVP's y column.
++  const float* w = world;
++  const float a = w[0], b = w[1], c = w[2], d = w[4], e = w[5], f = w[6], g = w[8], h = w[9], i = w[10];
++  const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
++  if (std::abs(det) < 1e-12f) {
++    return false;
++  }
++  const float inv[9] = {(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
++                        (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det,
++                        (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det};
++  const float y[3] = {world_view_projection[1], world_view_projection[5], world_view_projection[9]};
++  float length = 0.f;
++  for (int r = 0; r < 3; ++r) {
++    const float component = inv[r * 3] * y[0] + inv[r * 3 + 1] * y[1] + inv[r * 3 + 2] * y[2];
++    length += component * component;
++  }
++  return std::abs(std::sqrt(length) * v - 1.f) < 0.05f;
 +}
 +
 +// VR fork: the edges to fill in a copy of a render target drawn at a resolution scale.
@@ -2056,7 +2095,7 @@ index 53dcb7f..45c6b51 100644
  
    if (!graphics_system_)
      return;
-@@ -2943,6 +3414,25 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2943,6 +3448,27 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                   ui::vulkan::VulkanPresenter::kGuestOutputInternalLayout);
          }
  
@@ -2064,6 +2103,8 @@ index 53dcb7f..45c6b51 100644
 +        // frame's scene and HUD are copied already.
 +        // VR fork: the guest output's release barrier first (the copy takes it in its internal layout).
 +        SubmitBarriers(true);
++        ui::vulkan::vr::SetFrameHasScene(vr_frame_scene_);  // without a head-tracked scene: on the screen
++        vr_frame_scene_ = false;
 +        if (const int vr_screen = ui::vulkan::vr::BeginFrame(guest_output_width, guest_output_height);
 +            vr_screen >= 0) {
 +          deferred_command_buffer_.CmdVrFrameCopy(vulkan_context.image(),
@@ -2082,7 +2123,7 @@ index 53dcb7f..45c6b51 100644
          // Need to submit all the commands before giving the image back to the
          // presenter so it can submit its own commands for displaying it to the
          // queue, and also need to submit the release barrier.
-@@ -3378,7 +3868,10 @@ VkDescriptorSetLayout VulkanCommandProcessor::GetTextureDescriptorSetLayout(bool
+@@ -3378,7 +3904,10 @@ VkDescriptorSetLayout VulkanCommandProcessor::GetTextureDescriptorSetLayout(bool
    VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info;
    descriptor_set_layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
    descriptor_set_layout_create_info.pNext = nullptr;
@@ -2094,7 +2135,7 @@ index 53dcb7f..45c6b51 100644
    descriptor_set_layout_create_info.bindingCount = uint32_t(binding_count);
    descriptor_set_layout_create_info.pBindings = descriptor_set_layout_bindings_.data();
    VkDescriptorSetLayout texture_descriptor_set_layout;
-@@ -3447,8 +3940,9 @@ const VulkanPipelineCache::PipelineLayoutProvider* VulkanCommandProcessor::GetPi
+@@ -3447,8 +3976,9 @@ const VulkanPipelineCache::PipelineLayoutProvider* VulkanCommandProcessor::GetPi
    pipeline_layout_create_info.flags = 0;
    pipeline_layout_create_info.setLayoutCount = uint32_t(rex::countof(descriptor_set_layouts));
    pipeline_layout_create_info.pSetLayouts = descriptor_set_layouts;
@@ -2106,7 +2147,7 @@ index 53dcb7f..45c6b51 100644
    VkPipelineLayout pipeline_layout;
    if (dfn.vkCreatePipelineLayout(device, &pipeline_layout_create_info, nullptr, &pipeline_layout) !=
        VK_SUCCESS) {
-@@ -3651,6 +4145,30 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3651,6 +4181,30 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  
    // Vertex shader analysis.
    auto vertex_shader = static_cast<VulkanShader*>(active_vertex_shader());
@@ -2137,7 +2178,7 @@ index 53dcb7f..45c6b51 100644
    if (!vertex_shader) {
      // Always need a vertex shader.
      return draw_fail("missing_vertex_shader");
-@@ -4135,12 +4653,101 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4135,12 +4689,104 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
    }
  
@@ -2165,6 +2206,9 @@ index 53dcb7f..45c6b51 100644
 +      std::memcpy(world, &regs[XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(world));
 +      std::memcpy(world_view_projection, &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + 8 * 4], sizeof(world));
 +      ui::vulkan::vr::dlss::NoteSceneDraw(world, world_view_projection);
++      if (!vr_frame_scene_ && VrHeadTrackedProjection(world, world_view_projection)) {
++        vr_frame_scene_ = true;
++      }
 +      // The same draw last frame (its shaders, vertices, indices and place among such draws): its own motion.
 +      uint64_t key = vertex_shader->ucode_data_hash() * 0x9E3779B97F4A7C15ull ^
 +                     (pixel_shader ? pixel_shader->ucode_data_hash() : 0);
@@ -2239,7 +2283,7 @@ index 53dcb7f..45c6b51 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4195,8 +4802,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4195,8 +4841,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->RangeWrittenByGpu(0, SharedMemory::kBufferSize);
    }
  
@@ -2250,7 +2294,7 @@ index 53dcb7f..45c6b51 100644
      uint32_t memexport_total_size = 0;
      for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
        memexport_total_size += memexport_range.size_bytes;
-@@ -4419,11 +5026,85 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4419,11 +5065,85 @@ bool VulkanCommandProcessor::IssueCopy() {
      return false;
    }
  
@@ -2338,7 +2382,7 @@ index 53dcb7f..45c6b51 100644
    }
  
    return IssueCopy_ReadbackResolvePath();
-@@ -4848,8 +5529,11 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
+@@ -4848,8 +5568,11 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
  void VulkanCommandProcessor::DisableHostOcclusionQueries() {
    if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
      if (BeginSubmission(true)) {
@@ -2350,7 +2394,7 @@ index 53dcb7f..45c6b51 100644
        EndSubmission(false);
      }
    }
-@@ -4993,6 +5677,16 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4993,6 +5716,16 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
  
    size_t fences_total = submissions_in_flight_fences_.size();
    size_t fences_awaited = 0;
@@ -2367,7 +2411,7 @@ index 53dcb7f..45c6b51 100644
    if (await_submission > submission_completed_) {
      // Await in a blocking way if requested.
      // TODO(Triang3l): Await only one fence. "Fence signal operations that are
-@@ -5000,9 +5694,24 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5000,9 +5733,24 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // synchronization scope all commands that occur earlier in submission
      // order."
      const uint64_t wait_start_us = CounterNowMicros();
@@ -2395,7 +2439,7 @@ index 53dcb7f..45c6b51 100644
      g_submission_counters[2].fetch_add(1, std::memory_order_relaxed);
      g_submission_counters[3].fetch_add(CounterNowMicros() - wait_start_us,
                                         std::memory_order_relaxed);
-@@ -5405,6 +6114,47 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5405,6 +6153,47 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
  
      assert_false(command_buffers_writable_.empty());
      CommandBuffer command_buffer = command_buffers_writable_.back();
@@ -2443,7 +2487,7 @@ index 53dcb7f..45c6b51 100644
      if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to reset a Vulkan command pool");
        return false;
-@@ -5418,6 +6168,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5418,6 +6207,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -2451,7 +2495,7 @@ index 53dcb7f..45c6b51 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5456,6 +6207,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5456,6 +6246,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        g_submission_counters[1].fetch_add(CounterNowMicros() - submit_start_us,
                                           std::memory_order_relaxed);
      }
@@ -2462,7 +2506,7 @@ index 53dcb7f..45c6b51 100644
      if (submit_result != VK_SUCCESS) {
        REXGPU_ERROR("Failed to submit a Vulkan command buffer");
        if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
-@@ -5479,6 +6234,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5479,6 +6273,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      fences_free_.pop_back();
  
      submission_open_ = false;
@@ -2470,7 +2514,7 @@ index 53dcb7f..45c6b51 100644
    }
  
    if (is_closing_frame) {
-@@ -5532,6 +6288,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+@@ -5532,6 +6327,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
  
    constants_transient_descriptors_free_.clear();
    constants_transient_descriptors_used_.clear();
@@ -2479,7 +2523,7 @@ index 53dcb7f..45c6b51 100644
    for (std::vector<VkDescriptorSet>& transient_descriptors_free :
         single_transient_descriptors_free_) {
      transient_descriptors_free.clear();
-@@ -6480,6 +7238,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6480,6 +7277,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferCount) - 1;
    assert_zero(current_constant_buffers_up_to_date_ & ~kAllConstantBuffersMask);
    if ((current_constant_buffers_up_to_date_ & kAllConstantBuffersMask) != kAllConstantBuffersMask) {
@@ -2487,7 +2531,7 @@ index 53dcb7f..45c6b51 100644
      current_graphics_descriptor_set_values_up_to_date_ &=
          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
      size_t uniform_buffer_alignment =
-@@ -6512,23 +7271,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6512,23 +7310,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        // dummy buffer.
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_vertex, UINT32_C(1));
@@ -2525,7 +2569,7 @@ index 53dcb7f..45c6b51 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6541,23 +7303,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6541,23 +7342,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
            current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFloatPixel];
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_pixel, UINT32_C(1));
@@ -2563,7 +2607,7 @@ index 53dcb7f..45c6b51 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6597,6 +7362,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6597,6 +7401,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                                << SpirvShaderTranslator::kConstantBufferFetch;
      }
@@ -2573,7 +2617,7 @@ index 53dcb7f..45c6b51 100644
    }
  
    // Textures and samplers.
-@@ -6640,6 +7408,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6640,6 +7447,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (texture_count_pixel || sampler_count_pixel) &&
        !(current_graphics_descriptor_set_values_up_to_date_ &
          (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
@@ -2586,7 +2630,7 @@ index 53dcb7f..45c6b51 100644
    descriptor_write_image_info_.clear();
    descriptor_write_image_info_.reserve(
        (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-@@ -6656,6 +7430,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6656,6 +7469,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -2598,7 +2642,7 @@ index 53dcb7f..45c6b51 100644
    size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_vertex_textures && sampler_count_vertex) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6676,6 +7455,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6676,6 +7494,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -2622,7 +2666,7 @@ index 53dcb7f..45c6b51 100644
    size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_pixel_textures && sampler_count_pixel) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6707,8 +7503,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6707,8 +7542,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        VkDescriptorPoolSize constants_descriptor_count;
        constants_descriptor_count.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
        constants_descriptor_count.descriptorCount = SpirvShaderTranslator::kConstantBufferCount;
@@ -2637,7 +2681,7 @@ index 53dcb7f..45c6b51 100644
        if (constants_descriptor_set == VK_NULL_HANDLE) {
          return false;
        }
-@@ -6724,7 +7524,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6724,7 +7563,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        write_constants.dstBinding = i;
        write_constants.dstArrayElement = 0;
        write_constants.descriptorCount = 1;
@@ -2647,7 +2691,7 @@ index 53dcb7f..45c6b51 100644
        write_constants.pImageInfo = nullptr;
        write_constants.pBufferInfo = &current_constant_buffer_infos_[i];
        write_constants.pTexelBufferView = nullptr;
-@@ -6732,6 +7533,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6732,6 +7572,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
          constants_descriptor_set;
@@ -2660,7 +2704,7 @@ index 53dcb7f..45c6b51 100644
    }
    // Vertex shader textures and samplers.
    if (write_vertex_textures) {
-@@ -6751,7 +7558,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6751,7 +7597,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
          write_textures[0].dstSet;
    }
    // Pixel shader textures and samplers.
@@ -2669,7 +2713,7 @@ index 53dcb7f..45c6b51 100644
      VkWriteDescriptorSet* write_textures =
          write_descriptor_sets.data() + write_descriptor_set_count;
      uint32_t texture_descriptor_set_write_count = WriteTransientTextureBindings(
-@@ -6781,7 +7588,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6781,7 +7627,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    if (!texture_count_vertex && !sampler_count_vertex) {
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
    }
@@ -2679,7 +2723,7 @@ index 53dcb7f..45c6b51 100644
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
    }
    uint32_t descriptor_sets_remaining =
-@@ -6790,21 +7598,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6790,21 +7637,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    while (rex::bit_scan_forward(descriptor_sets_remaining, &descriptor_set_index)) {
      uint32_t descriptor_set_mask_tzcnt =
          rex::tzcnt(~(descriptor_sets_remaining | ((UINT32_C(1) << descriptor_set_index) - 1)));
@@ -4501,10 +4545,10 @@ index 0000000..7fcbabd
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..32f5f25
+index 0000000..1df24b3
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1634 @@
+@@ -0,0 +1,1638 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -4746,6 +4790,7 @@ index 0000000..32f5f25
 +  // GPU thread takes it at the swap packet (OnGpuSwap) for the frame's publication.
 +  std::mutex pose_mutex;
 +  bool frame_posed = false;
++  bool frame_has_scene = true;  // the GPU thread's: the frame being finished drew a head-tracked 3D scene
 +  float frame_pose[16]{}, frame_tangents[4]{};
 +  struct SwapPose {
 +    bool posed;
@@ -5463,7 +5508,8 @@ index 0000000..32f5f25
 +  quad.subImage.imageRect = {{0, 0}, {int32_t(eye_width), int32_t(g.height)}};
 +  quad.pose.orientation.w = 1.f;
 +  quad.pose.position = {0.f, 0.f, -2.5f};
-+  quad.size = {3.f, eye_width ? 3.f * float(g.height) / float(eye_width) : 3.f * 9.f / 16.f};
++  // The game's own aspect: the picture's pixels are not square (the eyes are drawn taller than the output).
++  quad.size = {3.f, 3.f * g.hud_aspect.load(std::memory_order_relaxed)};
 +  const XrCompositionLayerBaseHeader* layers[1] = {reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad)};
 +  // A frame rendered with a head pose: a projection layer at that pose (the runtime turns it to the head's pose now),
 +  // the same picture in both eyes (no stereo yet).
@@ -5853,6 +5899,8 @@ index 0000000..32f5f25
 +
 +void HudCaptured() { g.split_hud_captured = true; }
 +
++void SetFrameHasScene(bool has_scene) { g.frame_has_scene = has_scene; }
++
 +int BeginFrame(uint32_t width, uint32_t height) {
 +  uint32_t out_width = width, out_height = height;
 +  dlss::OutputSize(width, height, out_width, out_height);
@@ -5870,7 +5918,7 @@ index 0000000..32f5f25
 +  g.pending.valid = true;
 +  g.pending.hud = split && g.split_hud_captured;
 +  g.split_hud_captured = false;
-+  g.pending.posed = g.gpu_pose.posed;
++  g.pending.posed = g.gpu_pose.posed && g.frame_has_scene;  // 2D only (a title screen): on the screen
 +  std::memcpy(g.pending.pose, g.gpu_pose.pose, sizeof(g.pending.pose));
 +  std::memcpy(g.pending.tangents, g.gpu_pose.tangents, sizeof(g.pending.tangents));
 +  g.pending.screen = index;
