@@ -299,8 +299,10 @@ void TickAbTest() {
 //
 // In VR (MCLA_VR=1): twice the vertical resolution (1280x1440 an eye: about square pixels over the headset's square
 // field of view), no motion blur or depth of field (both blur head turns; the eye focuses for itself), and DLSS's
-// anti-aliasing in place of the game's MSAA when DLSS starts, its output upscaled 1.5x to the headset (1920x2160 an
-// eye: sharper on a high-resolution headset, ~0.4 ms; vr_dlss_output_scale=1 keeps DLAA at the render size).
+// anti-aliasing in place of the game's MSAA when DLSS starts, its output upscaled 2x to the headset (2560x2880 an
+// eye, about a 2880 panel's; ~1 ms over 1.5x: driving 95.6 FPS uncapped against 105 with SteamVR running;
+// vr_dlss_output_scale=1.75 or 1.5 for more headroom, 1 for DLAA at the render size). A native 2560x2880 render
+// (draw scale 2x4) runs 44 FPS.
 // VR: --vr=true, or MCLA_VR=1.
 bool VrRequested() {
   const char* v = std::getenv("MCLA_VR");
@@ -318,8 +320,8 @@ void MclaConfigureGpuDefaults() {
                                      {"mcla_motion_blur", "false"},
                                      {"mcla_depth_of_field", "false"},
                                      {"vr_dlss", "true"},
-                                     {"vr_dlss_output_scale", "1.5"}});
-    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field, DLSS to 1.5x (unless set)");
+                                     {"vr_dlss_output_scale", "2"}});
+    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field, DLSS to 2x (unless set)");
   }
   for (const auto& [name, value] : defaults) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
