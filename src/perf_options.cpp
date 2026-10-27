@@ -393,7 +393,11 @@ void MclaConfigureGpuDefaults() {
       {"clear_memory_page_state", "false"},
   };
   if (VrRequested()) {
-    defaults.insert(defaults.end(), {{"mcla_motion_blur", "false"}, {"mcla_depth_of_field", "false"}});
+    // D3D's clear quads (unclipped, 8192x8192 scissor) sized from their vertices on the CPU, not as all of EDRAM:
+    // else every target's contents are transferred into the cleared surface and back (2x4 stereo: 83 -> 108 FPS).
+    defaults.insert(defaults.end(), {{"mcla_motion_blur", "false"},
+                                     {"mcla_depth_of_field", "false"},
+                                     {"execute_unclipped_draw_vs_on_cpu", "true"}});
   }
   for (const auto& [name, value] : defaults) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
