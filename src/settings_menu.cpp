@@ -46,6 +46,9 @@ const char* g_mcla_settings_path = nullptr;
 namespace rex::ui::vulkan::vr {
 double VideoMemoryTotalGB();  // rexglue vr_twins
 double VideoMemoryNeededGB(uint32_t scale_area);
+namespace dlss {
+bool Ready();  // rexglue vr_dlss
+}  // namespace dlss
 }  // namespace rex::ui::vulkan::vr
 
 namespace {
@@ -508,9 +511,30 @@ void VrResolutionLabels() {
     kVrResolutionLabels[i] = labels[i].c_str();
   }
 }
+// DLSS needs an NVIDIA RTX GPU (Balanced by default). Where it cannot run, the game uses its own MSAA at the render
+// size: the menu then shows OFF (MSAA) as the setting and the DLSS modes as needing RTX (VrDlssLabels, when the menu
+// is made).
 constexpr const char* kVrDlssValues[] = {"off", "dlaa", "quality", "balanced", "performance", "ultra"};
-constexpr const char* kVrDlssLabels[] = {"OFF",          "DLAA (1X)",        "QUALITY (1.5X)",
-                                         "BALANCED (1.72X)", "PERFORMANCE (2X)", "ULTRA PERFORMANCE (3X)"};
+const char* kVrDlssLabels[] = {"OFF (MSAA)",       "DLAA (1X)",        "QUALITY (1.5X)",
+                               "BALANCED (1.72X)", "PERFORMANCE (2X)", "ULTRA PERFORMANCE (3X)"};
+
+void VrDlssLabels() {
+  static std::string labels[6];
+  static const char* const kNames[] = {"OFF (MSAA)",       "DLAA (1X)",        "QUALITY (1.5X)",
+                                       "BALANCED (1.72X)", "PERFORMANCE (2X)", "ULTRA PERFORMANCE (3X)"};
+  const bool ready = rex::ui::vulkan::vr::dlss::Ready();
+  for (int i = 0; i < 6; ++i) {
+    labels[i] = kNames[i];
+    if (i && !ready) {
+      labels[i] += " NEEDS NVIDIA RTX";
+    }
+    kVrDlssLabels[i] = labels[i].c_str();
+  }
+  // What runs: without DLSS the default (Balanced) is MSAA. Shown, not saved (only menu changes are).
+  if (!ready && rex::cvar::GetFlagSource("vr_dlss_mode") == rex::cvar::Source::kDefault) {
+    rex::cvar::SetFlagByName("vr_dlss_mode", "off");
+  }
+}
 
 const ItemDef kVrItems[] = {
     {"PM_MxVrRes", ItemKind::kStringChoice, "vr_resolution", "RENDER SIZE AN EYE (NEXT START)",
@@ -890,7 +914,8 @@ void CreateSubmenus() {
   if (g_menus_created.load(std::memory_order_relaxed)) {
     return;
   }
-  VrResolutionLabels();  // the card's memory is known once the GPU has started
+  VrResolutionLabels();  // the card's memory and DLSS are known once the GPU has started
+  VrDlssLabels();
   uint32_t settings = g_settings_state.load(std::memory_order_relaxed);
   if (!settings) {
     return;
