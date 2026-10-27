@@ -6274,10 +6274,10 @@ index 0000000..924e791
 +	0x00000046,0x0000003f,0x00040063,0x00000037,0x00000038,0x00000046,0x000100fd,0x00010038
 diff --git a/src/ui/vulkan/vr_dlss.cpp b/src/ui/vulkan/vr_dlss.cpp
 new file mode 100644
-index 0000000..f2566ad
+index 0000000..60e9d82
 --- /dev/null
 +++ b/src/ui/vulkan/vr_dlss.cpp
-@@ -0,0 +1,819 @@
+@@ -0,0 +1,855 @@
 +// VR fork: DLSS for the headset's eyes (vr_dlss.h).
 +#include <rex/ui/vulkan/vr_dlss.h>
 +
@@ -6546,9 +6546,14 @@ index 0000000..f2566ad
 +  bool reset = true;          // DLSS's history dropped (the first frame, after a gap or a camera cut)
 +  bool depth_ready = false;
 +  bool feature = false;
++  // VR fork: the output size changed (the settings menu) with a feature made: the new one waits until the frames
++  // using the old are done (CreateFeature releases the old at once), the plain copy meanwhile.
++  bool feature_hold = false;
++  uint32_t feature_hold_until = 0;
 +  float jitter_x = 0.f, jitter_y = 0.f;  // the frame's, render pixels (for DLSS)
 +};
 +std::array<Eye, 2> eyes;
++uint32_t current_frame = 0;  // the frame EnsureEye last saw
 +
 +}  // namespace
 +
@@ -6584,6 +6589,7 @@ index 0000000..f2566ad
 +}
 +
 +bool EnsureEye(Eye& eye, uint32_t width, uint32_t height, uint32_t frame) {
++  current_frame = frame;
 +  if (!retired.empty()) {
 +    DestroyRetired(frame);
 +  }
@@ -6598,6 +6604,11 @@ index 0000000..f2566ad
 +      retired.push_back({*image, frame});
 +      *image = {};
 +    }
++  }
++  if (eye.feature) {  // a new size while running: the old feature may be in frames still on the GPU
++    eye.feature_hold = true;
++    eye.feature_hold_until = frame + 16;
++    REXLOG_INFO("VR DLSS: a new output size, {}x{}: the new feature in 16 frames", output_width, output_height);
 +  }
 +  eye.feature = false;
 +  eye.have_previous = false;
@@ -6747,6 +6758,25 @@ index 0000000..f2566ad
 +}  // namespace
 +
 +void NextFrame(uint32_t width, uint32_t height) {
++  {  // VR fork, development: MCLA_VR_TEST_SCALE=frame:scale[,frame:scale...] sets the output scale at those frames
++    // (a settings-menu change while running, without the menu)
++    static uint32_t test_frame = 0;
++    static const std::string test = std::getenv("MCLA_VR_TEST_SCALE") ? std::getenv("MCLA_VR_TEST_SCALE") : "";
++    ++test_frame;
++    size_t at = 0;
++    while (!test.empty() && at < test.size()) {
++      const size_t colon = test.find(':', at), comma = test.find(',', at);
++      if (colon == std::string::npos) {
++        break;
++      }
++      if (uint32_t(std::atoi(test.c_str() + at)) == test_frame) {
++        const std::string scale = test.substr(colon + 1, comma == std::string::npos ? std::string::npos : comma - colon - 1);
++        rex::cvar::SetFlagByName("vr_dlss_output_scale", scale);
++        REXLOG_INFO("VR DLSS test: frame {}, output scale {}", test_frame, scale);
++      }
++      at = comma == std::string::npos ? test.size() : comma + 1;
++    }
++  }
 +  if (!g.ready || !width || !height) {
 +    return;
 +  }
@@ -6958,6 +6988,12 @@ index 0000000..f2566ad
 +    return false;
 +  }
 +  eye.depth_ready = false;
++  if (!eye.feature && eye.feature_hold) {
++    if (int32_t(current_frame - eye.feature_hold_until) < 0) {
++      return false;
++    }
++    eye.feature_hold = false;
++  }
 +  if (!eye.feature) {
 +    g.api->SelectFeature(uint32_t(index));
 +    BbDlssFeature feature{};
@@ -7099,10 +7135,10 @@ index 0000000..f2566ad
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..c74d1a0
+index 0000000..d3f79d5
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1642 @@
+@@ -0,0 +1,1645 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -7970,6 +8006,9 @@ index 0000000..c74d1a0
 +// The headset's thread: a new publication into the screen's swapchain.
 +bool Show(const State::Published& p) {
 +  const uint32_t width = p.out_width * (Stereo() ? 2 : 1);  // stereo: the eyes side by side
++  if (width != g.screen_width || p.out_height != g.screen_height) {
++    return false;  // VR fork: published before the screens changed size (a new headset size): its screen is gone
++  }
 +  if ((g.width != width || g.height != p.out_height || !g.swapchain) && !CreateSwapchain(width, p.out_height)) {
 +    return false;
 +  }

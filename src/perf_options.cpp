@@ -8,6 +8,7 @@
 
 #include "generated/default/mcla_init.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -309,9 +310,32 @@ void TickAbTest() {
 // --vr_dlss_output_scale on the command line wins over them.
 REXCVAR_DEFINE_STRING(vr_resolution, "1x2", "VR",
                       "VR render size an eye: 1x2 (1280x1440), 2x4 (2560x2880) or 3x6 (3840x4320)");
-REXCVAR_DEFINE_STRING(vr_dlss_mode, "balanced", "VR",
-                      "VR DLSS: off (the game's MSAA), dlaa (1x), quality (1.5x), balanced (1.72x), performance (2x) or "
-                      "ultra (3x). Without an NVIDIA RTX GPU DLSS cannot run: off (MSAA) at the render size");
+REXCVAR_DEFINE_STRING(vr_headset_size, "2240x2520", "VR",
+                      "VR size an eye sent to the headset: render (the render size, the game's MSAA), dlaa (the render "
+                      "size, DLSS anti-aliasing) or WxH, DLSS upscaling the render size to it (at most 3x; at or below "
+                      "the render size: DLAA). Without an NVIDIA RTX GPU DLSS cannot run: the render size with MSAA");
+
+double VrHeadsetUpscale() {
+  // DLSS's upscale: the headset width over the render width (the same over the heights: both are 8:9); 1 (DLAA) for
+  // the render size or at or below it; at most 3.
+  const std::string headset = REXCVAR_GET(vr_headset_size);
+  if (headset == "render" || headset == "dlaa") {
+    return 1.0;
+  }
+  const double render_width =
+      1280.0 * std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()));
+  return std::clamp(double(std::atoi(headset.c_str())) / render_width, 1.0, 3.0);
+}
+
+// The headset size into DLSS's output scale (unless the command line set it): at start, and from the settings menu
+// while running (the eyes' images, the headset screens and the DLSS features follow the new size; MSAA, chosen with
+// "render", is the game's and takes the next start).
+void VrApplyHeadsetSize() {
+  if (rex::cvar::GetFlagSource("vr_dlss_output_scale") == rex::cvar::Source::kCommandLine) {
+    return;
+  }
+  rex::cvar::SetFlagByName("vr_dlss_output_scale", std::to_string(VrHeadsetUpscale()).c_str());
+}
 
 bool VrRequested() {
   const char* v = std::getenv("MCLA_VR");
@@ -345,23 +369,17 @@ void MclaConfigureGpuDefaults() {
       rex::cvar::SetFlagByName("draw_resolution_scale_x", scale_x);
       rex::cvar::SetFlagByName("draw_resolution_scale_y", scale_y);
     }
-    const std::string mode = REXCVAR_GET(vr_dlss_mode);
-    const char* upscale = mode == "dlaa"          ? "1"
-                          : mode == "quality"     ? "1.5"
-                          : mode == "performance" ? "2"
-                          : mode == "ultra"       ? "3"
-                                                  : "1.72";
+    const std::string headset = REXCVAR_GET(vr_headset_size);
+    const uint32_t render_width = 1280 * uint32_t(std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()));
+    const uint32_t render_height = 720 * uint32_t(std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_y").c_str()));
     if (!from_command_line("vr_dlss")) {
-      rex::cvar::SetFlagByName("vr_dlss", mode == "off" ? "false" : "true");
+      rex::cvar::SetFlagByName("vr_dlss", headset != "render" ? "true" : "false");
     }
-    if (!from_command_line("vr_dlss_output_scale")) {
-      rex::cvar::SetFlagByName("vr_dlss_output_scale", upscale);
-    }
-    REXLOG_INFO("VR: render {}x{} an eye (vr_resolution {}), DLSS {} (vr_dlss_mode {}, x{}; MSAA where DLSS cannot "
-                "run), no motion blur or depth of field",
-                1280 * std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()),
-                720 * std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_y").c_str()), resolution,
-                rex::cvar::GetFlagByName("vr_dlss"), mode, rex::cvar::GetFlagByName("vr_dlss_output_scale"));
+    VrApplyHeadsetSize();
+    REXLOG_INFO("VR: render {}x{} an eye (vr_resolution {}), headset {} (DLSS {}, x{}; the render size with MSAA "
+                "where DLSS cannot run), no motion blur or depth of field",
+                render_width, render_height, resolution, headset, rex::cvar::GetFlagByName("vr_dlss"),
+                rex::cvar::GetFlagByName("vr_dlss_output_scale"));
   }
   if (VrRequested() && REXCVAR_GET(mcla_fps) != 0) {
     // VR paces the game at the headset's refresh rate itself; the game's limiter (30 by default) would hold it below.

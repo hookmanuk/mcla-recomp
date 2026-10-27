@@ -51,6 +51,8 @@ bool Ready();  // rexglue vr_dlss
 }  // namespace dlss
 }  // namespace rex::ui::vulkan::vr
 
+void VrApplyHeadsetSize();  // perf_options.cpp
+
 namespace {
 
 // --- Guest addresses ---------------------------------------------------------
@@ -357,6 +359,9 @@ std::vector<std::string> g_changed_options;  // set in the menu since the last s
 void OptionSet(const char* name, const char* value) {
   REXLOG_INFO("settings menu: {} = {}", name, value);
   rex::cvar::SetFlagByName(name, value);
+  if (std::strcmp(name, "vr_headset_size") == 0) {
+    VrApplyHeadsetSize();  // live: DLSS's output follows
+  }
   std::lock_guard lock(g_changed_mutex);
   if (std::find(g_changed_options.begin(), g_changed_options.end(), name) == g_changed_options.end()) {
     g_changed_options.emplace_back(name);
@@ -511,36 +516,51 @@ void VrResolutionLabels() {
     kVrResolutionLabels[i] = labels[i].c_str();
   }
 }
-// DLSS needs an NVIDIA RTX GPU (Balanced by default). Where it cannot run, the game uses its own MSAA at the render
-// size: the menu then shows OFF (MSAA) as the setting and the DLSS modes as needing RTX (VrDlssLabels, when the menu
-// is made).
-constexpr const char* kVrDlssValues[] = {"off", "dlaa", "quality", "balanced", "performance", "ultra"};
-const char* kVrDlssLabels[] = {"OFF (MSAA)",       "DLAA (1X)",        "QUALITY (1.5X)",
-                               "BALANCED (1.72X)", "PERFORMANCE (2X)", "ULTRA PERFORMANCE (3X)"};
+// The size an eye sent to the headset: the render size (MSAA, or DLSS's anti-aliasing) or a bigger size DLSS upscales
+// the render size to (needs an NVIDIA RTX GPU; without it the game sends the render size with its MSAA, and the menu
+// shows that). Labels made with the menu (VrHeadsetLabels) from the render size the game started with.
+constexpr const char* kVrHeadsetValues[] = {"render", "dlaa", "1920x2160", "2240x2520", "2560x2880", "3200x3600",
+                                            "3840x4320"};
+const char* kVrHeadsetLabels[] = {"SAME AS RENDER (MSAA NEXT START)", "SAME AS RENDER (DLAA)", "1920 X 2160",
+                                  "2240 X 2520", "2560 X 2880", "3200 X 3600", "3840 X 4320"};
 
-void VrDlssLabels() {
-  static std::string labels[6];
-  static const char* const kNames[] = {"OFF (MSAA)",       "DLAA (1X)",        "QUALITY (1.5X)",
-                                       "BALANCED (1.72X)", "PERFORMANCE (2X)", "ULTRA PERFORMANCE (3X)"};
+void VrHeadsetLabels() {
+  static std::string labels[7];
+  static const char* const kNames[] = {"SAME AS RENDER (MSAA NEXT START)", "SAME AS RENDER (DLAA)", "1920 X 2160",
+                                       "2240 X 2520", "2560 X 2880", "3200 X 3600", "3840 X 4320"};
+  static const uint32_t kWidths[] = {0, 0, 1920, 2240, 2560, 3200, 3840};
   const bool ready = rex::ui::vulkan::vr::dlss::Ready();
-  for (int i = 0; i < 6; ++i) {
+  const uint32_t render_width =
+      1280 * uint32_t(std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str())));
+  for (int i = 0; i < 7; ++i) {
     labels[i] = kNames[i];
     if (i && !ready) {
       labels[i] += " NEEDS NVIDIA RTX";
+    } else if (kWidths[i]) {
+      const double upscale = double(kWidths[i]) / double(render_width);
+      char text[48];
+      if (upscale <= 1.0) {
+        std::snprintf(text, sizeof text, " (DLAA)");  // not above the render size
+      } else if (upscale > 3.0) {
+        std::snprintf(text, sizeof text, " (DLSS 3X MAX)");
+      } else {
+        std::snprintf(text, sizeof text, " (DLSS %.2gX)", upscale);
+      }
+      labels[i] += text;
     }
-    kVrDlssLabels[i] = labels[i].c_str();
+    kVrHeadsetLabels[i] = labels[i].c_str();
   }
-  // What runs: without DLSS the default (Balanced) is MSAA. Shown, not saved (only menu changes are).
-  if (!ready && rex::cvar::GetFlagSource("vr_dlss_mode") == rex::cvar::Source::kDefault) {
-    rex::cvar::SetFlagByName("vr_dlss_mode", "off");
+  // What runs: without DLSS any choice is the render size with MSAA. Shown, not saved (only menu changes are).
+  if (!ready && rex::cvar::GetFlagSource("vr_headset_size") == rex::cvar::Source::kDefault) {
+    rex::cvar::SetFlagByName("vr_headset_size", "render");
   }
 }
 
 const ItemDef kVrItems[] = {
     {"PM_MxVrRes", ItemKind::kStringChoice, "vr_resolution", "RENDER SIZE AN EYE (NEXT START)",
      kVrResolutionValues, kVrResolutionLabels, nullptr, 3},
-    {"PM_MxVrDlss", ItemKind::kStringChoice, "vr_dlss_mode", "DLSS (NEXT START)", kVrDlssValues, kVrDlssLabels,
-     nullptr, 6},
+    {"PM_MxVrHeadset", ItemKind::kStringChoice, "vr_headset_size", "HEADSET SIZE AN EYE",
+     kVrHeadsetValues, kVrHeadsetLabels, nullptr, 7},
 };
 
 const ItemDef kControlItems[] = {
@@ -915,7 +935,7 @@ void CreateSubmenus() {
     return;
   }
   VrResolutionLabels();  // the card's memory and DLSS are known once the GPU has started
-  VrDlssLabels();
+  VrHeadsetLabels();
   uint32_t settings = g_settings_state.load(std::memory_order_relaxed);
   if (!settings) {
     return;
