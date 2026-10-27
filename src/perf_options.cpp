@@ -308,9 +308,10 @@ void TickAbTest() {
 // The VR settings page's choices (settings_menu.cpp), read at start: the per-eye render size as a draw resolution
 // scale on 1280x720, and the DLSS mode as its upscale. A --draw_resolution_scale_x/y, --vr_dlss or
 // --vr_dlss_output_scale on the command line wins over them.
-// Default 2560x2880 with no anti-aliasing (Matt 2026-10-27: "thats the best setting and should be the default"; it
-// held 72 FPS where DLAA ran 67 and MSAA 57). A card without the memory gets a smaller size at start (vr_twins.cpp).
-REXCVAR_DEFINE_STRING(vr_resolution, "2x4", "VR",
+// Default 2560x2160 (2x3, ~10 GB; Matt 2026-10-27) with no anti-aliasing (Matt: "thats the best setting and should be
+// the default"; at 2x4 it held 72 FPS where DLAA ran 67 and MSAA 57). A card without the memory gets a smaller size
+// at start (vr_twins.cpp).
+REXCVAR_DEFINE_STRING(vr_resolution, "2x3", "VR",
                       "VR render size an eye as the draw scale XxY on 1280x720: 1x2 (1280x1440), 2x3 (2560x2160), 2x4 "
                       "(2560x2880), 3x5 (3840x3600) or 3x6 (3840x4320)");
 REXCVAR_DEFINE_STRING(vr_headset_size, "noaa", "VR",
@@ -381,7 +382,7 @@ void MclaConfigureGpuDefaults() {
     const std::string resolution = REXCVAR_GET(vr_resolution);  // "XxY", each 1 to 7
     const size_t cross = resolution.find('x');
     const int scale_x = cross != std::string::npos ? std::clamp(std::atoi(resolution.c_str()), 1, 7) : 2;
-    const int scale_y = cross != std::string::npos ? std::clamp(std::atoi(resolution.c_str() + cross + 1), 1, 7) : 4;
+    const int scale_y = cross != std::string::npos ? std::clamp(std::atoi(resolution.c_str() + cross + 1), 1, 7) : 3;
     if (!from_command_line("draw_resolution_scale_x") && !from_command_line("draw_resolution_scale_y")) {
       rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(scale_x).c_str());
       rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(scale_y).c_str());

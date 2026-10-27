@@ -523,12 +523,12 @@ void VrResolutionLabels() {
 // RTX GPU: without it those say NO RTX.
 constexpr int kVrHeadsetMax = 9;
 const char* kVrHeadsetValues[kVrHeadsetMax] = {"noaa", "msaa", "dlaa", "1.25", "1.5", "1.75", "2", "2.5", "3"};
-const char* kVrHeadsetLabels[kVrHeadsetMax] = {"RENDER (NO AA)", "RENDER (MSAA)", "RENDER (DLAA)"};
+const char* kVrHeadsetLabels[kVrHeadsetMax] = {"NO AA", "MSAA (RESTART)", "DLAA"};
 
 ItemDef kVrItems[] = {
     {"PM_MxVrRes", ItemKind::kStringChoice, "vr_resolution", "RENDER SIZE (RESTART)", kVrResolutionValues,
      kVrResolutionLabels, nullptr, kVrResolutionCount},
-    {"PM_MxVrHeadset", ItemKind::kStringChoice, "vr_headset_size", "HEADSET SIZE (MSAA NEEDS RESTART)",
+    {"PM_MxVrHeadset", ItemKind::kStringChoice, "vr_headset_size", "HEADSET SIZE",
      kVrHeadsetValues, kVrHeadsetLabels, nullptr, kVrHeadsetMax},
 };
 
@@ -538,9 +538,9 @@ void VrHeadsetLabels() {
   const bool ready = rex::ui::vulkan::vr::dlss::Ready();
   const int render_width = 1280 * std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()));
   const int render_height = 720 * std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_y").c_str()));
-  labels[0] = "RENDER (NO AA)";
-  labels[1] = "RENDER (MSAA)";
-  labels[2] = ready ? "RENDER (DLAA)" : "DLAA NO RTX";
+  labels[0] = "NO AA";
+  labels[1] = "MSAA (RESTART)";
+  labels[2] = ready ? "DLAA" : "DLAA NO RTX";
   int count = 3;
   for (double factor : kFactors) {
     const int width = int(render_width * factor + 0.5) & ~1, height = int(render_height * factor + 0.5) & ~1;
