@@ -317,7 +317,7 @@ REXCVAR_DEFINE_STRING(vr_resolution, "2x3", "VR",
 REXCVAR_DEFINE_STRING(vr_headset_size, "noaa", "VR",
                       "VR size an eye sent to the headset: noaa (the render size, no anti-aliasing), msaa (the render "
                       "size, the game's MSAA; next start), dlaa (the render size, DLSS anti-aliasing) or an upscale "
-                      "factor of the render size, 1.25 to 3 (DLSS; at most 7680 on a side). DLSS needs an NVIDIA RTX "
+                      "factor of the render size, 1.25 to 2 (DLSS; at most 7680 on a side). DLSS needs an NVIDIA RTX "
                       "GPU");
 
 // The headset sizes the render size goes out at unchanged, DLSS loaded but not used (vr_dlss_bypass, live).
@@ -340,7 +340,7 @@ double VrHeadsetUpscale() {
   const double upscale = headset.find('x') != std::string::npos ? std::atof(headset.c_str()) / render_width
                                                                   : std::atof(headset.c_str());
   // At most 7680 on a side (DLSS's and the headsets' sizes).
-  return std::clamp(upscale, 1.0, std::max(1.0, std::min(3.0, 7680.0 / std::max(render_width, render_height))));
+  return std::clamp(upscale, 1.0, std::max(1.0, std::min(2.0, 7680.0 / std::max(render_width, render_height))));
 }
 
 // The headset size into DLSS's output scale (unless the command line set it): at start, and from the settings menu
@@ -359,7 +359,37 @@ bool VrRequested() {
   return (v && v[0] == '1') || rex::cvar::Query<bool>("vr");
 }
 
+namespace rex::input {
+void SetButtonPressedHook(void (*hook)(uint16_t button));  // rexglue input_system
+}
+void VrLogMenuStack(const char* why);  // settings_menu.cpp, development
+bool VrPauseMenuOpen();                // settings_menu.cpp
+namespace rex::ui::vulkan::vr {
+void Recenter();  // rexglue vr_openxr
+bool ShowingGameplay();
+}
+
 void MclaConfigureGpuDefaults() {
+  if (VrRequested()) {
+    // Start pressed outside gameplay (the title's "press start", the front end): the headset recentres on the head,
+    // so the game starts facing where the player sits (Matt 2026-10-27). In gameplay Start pauses, the view stays.
+    // Back in the pause menu recentres too (Matt 2026-10-27).
+    rex::input::SetButtonPressedHook([](uint16_t button) {
+      if (button == 0x0010 /* START */) {
+        VrLogMenuStack("start");
+        if (!rex::ui::vulkan::vr::ShowingGameplay()) {
+          rex::ui::vulkan::vr::Recenter();
+          REXLOG_INFO("VR: recentred (Start outside gameplay)");
+        }
+      } else if (button == 0x0020 /* BACK */) {
+        VrLogMenuStack("back");
+        if (VrPauseMenuOpen()) {
+          rex::ui::vulkan::vr::Recenter();
+          REXLOG_INFO("VR: recentred (Back in the pause menu)");
+        }
+      }
+    });
+  }
   std::vector<std::pair<const char*, const char*>> defaults = {
       {"shared_memory_hot_page_faults", "2"},
       {"shared_memory_hot_page_exact", "0"},

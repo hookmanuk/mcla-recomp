@@ -183,6 +183,7 @@ extern "C" REX_FUNC(sub_8217CE80) {
     __imp__sub_8217CE80(ctx, base);
     return;
   }
+  vr::NoteCameraPose(frame.pose, frame.tangents);  // the pose in the camera now (the GPU draws with it next)
   const float* pose = frame.pose;
   static uint32_t scratch = 0;
   if (!scratch) {

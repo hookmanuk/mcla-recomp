@@ -673,6 +673,21 @@ index 04856ee..c721c51 100644
    std::array<VkPipeline, kLoadShaderCount> load_pipelines_{};
    std::array<VkPipeline, kLoadShaderCount> load_pipelines_scaled_{};
  
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 1cb3faa..c6d69e3 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -25,6 +25,10 @@ class Window;
+ 
+ namespace rex::input {
+ 
++// VR fork: called when one of player one's buttons goes down (X_INPUT_GAMEPAD_* bits; the game recentres the headset
++// on Start outside gameplay and on Back in the pause menu).
++void SetButtonPressedHook(void (*hook)(uint16_t button));
++
+ class InputSystem : public system::IInputSystem {
+  public:
+   explicit InputSystem(rex::ui::Window* window);
 diff --git a/include/rex/ui/vulkan/bbport_dlss_bridge.h b/include/rex/ui/vulkan/bbport_dlss_bridge.h
 new file mode 100644
 index 0000000..bb217fc
@@ -939,10 +954,10 @@ index 0000000..91d3fe9
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/include/rex/ui/vulkan/vr_openxr.h b/include/rex/ui/vulkan/vr_openxr.h
 new file mode 100644
-index 0000000..151aed8
+index 0000000..516ed44
 --- /dev/null
 +++ b/include/rex/ui/vulkan/vr_openxr.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,129 @@
 +// VR fork: OpenXR for the Vulkan renderer (ported from the Driveclub recomp's and the Uncharted port's VR layer).
 +//
 +// On with MCLA_VR=1 when an OpenXR runtime answers (XR_RUNTIME_JSON picks one, e.g. the OpenXR Simulator). The
@@ -1035,6 +1050,9 @@ index 0000000..151aed8
 +
 +/// The head's current position and yaw become the seat's origin (at the next frame).
 +void Recenter();
++/// Whether the headset shows gameplay now: a head-tracked frame with the HUD on its own layer (not the title, menus
++/// or loading).
++bool ShowingGameplay();
 +
 +/// The eye's (0 left, 1 right) shift of perspective geometry in clip space: x += P00 * (+-baseline / 2).
 +float EyeShift(int eye);
@@ -1045,11 +1063,24 @@ index 0000000..151aed8
 +/// The game thread, its camera hook: the head pose (HeadPose's) and field of view the frame being built renders with.
 +void SetFramePose(const float (&pose)[16], const float (&tangents)[4]);
 +
-+/// The game thread, VdSwap: the frame is complete; its pose goes with its swap (one swap packet per VdSwap).
-+void OnGameSwap();
++/// The game thread, VdSwap: the frame is complete; its pose goes with its swap packet, keyed by the frontbuffer (the
++/// physical address the packet presents).
++void OnGameSwap(uint32_t frontbuffer);
 +
-+/// The GPU thread, each swap packet (IssueSwap): the pose of the frame it presents (in the order of OnGameSwap).
-+void OnGpuSwap();
++/// The GPU thread, each swap packet (IssueSwap): the pose of the frame it presents, matched by its frontbuffer (by
++/// order alone a swap queued at start without a packet left every later frame with the previous frame's pose: the
++/// world moved when the head turned).
++void OnGpuSwap(uint32_t frontbuffer);
++/// Development (MCLA_VR_POSE_TRACE=1): the yaw the GPU draws a frame's scene with, logged when it changes.
++void TraceGpuCameraYaw(float yaw);
++
++/// The game's camera hook, when it turns the camera by a head pose (the update thread): the pose now in the camera.
++void NoteCameraPose(const float (&pose)[16], const float (&tangents)[4]);
++/// The GPU thread, a frame's first head-tracked scene draw: the camera's pose now is the one this frame is drawn with
++/// (the GPU reads the camera the update thread wrote, a frame before the render thread's SetFramePose: labelling by
++/// that showed every frame with the previous frame's pose, the world moving when the head turned). OnGpuSwap sends
++/// the frame with it. MCLA_VR_POSE_FROM_GPU=0: the old labelling.
++void SceneDrawStarted();
 +
 +/// The head pose for the game's next frame: rows of the head's x, y, z axes and its position in the seat's space
 +/// (row vectors), and the eyes' field of view (tangents left, right, up, down). False before the first tracked frame.
@@ -2063,7 +2094,7 @@ index 47926fb..4997ce1 100644
        page_heat_decay_ms_ = now_ms;
        for (uint8_t& heat : page_heat_) {
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 53dcb7f..854698a 100644
+index 53dcb7f..a9eabdf 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -12,6 +12,12 @@
@@ -2910,7 +2941,7 @@ index 53dcb7f..854698a 100644
 +  }
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
-+  ui::vulkan::vr::OnGpuSwap();  // VR fork: the head pose this frame was rendered with
++  ui::vulkan::vr::OnGpuSwap(frontbuffer_ptr);  // VR fork: the head pose this frame was rendered with
 +  ui::vulkan::vr::dlss::NextFrame(frontbuffer_width * texture_cache_->draw_resolution_scale_x(),  // VR fork
 +                                  frontbuffer_height * texture_cache_->draw_resolution_scale_y());
  
@@ -3110,7 +3141,7 @@ index 53dcb7f..854698a 100644
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
-@@ -4135,12 +5000,104 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4135,12 +5000,121 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
    }
  
@@ -3140,6 +3171,23 @@ index 53dcb7f..854698a 100644
 +      ui::vulkan::vr::dlss::NoteSceneDraw(world, world_view_projection);
 +      if (!vr_frame_scene_ && VrHeadTrackedProjection(world, world_view_projection)) {
 +        vr_frame_scene_ = true;
++        ui::vulkan::vr::SceneDrawStarted();  // VR fork: the pose this frame is drawn with
++        {  // VR fork, development (MCLA_VR_POSE_TRACE): the yaw the GPU draws this frame's scene with
++          const float* w = world;
++          const float a = w[0], b = w[1], c = w[2], d = w[4], e = w[5], f = w[6], g = w[8], h = w[9], i = w[10];
++          const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
++          if (std::abs(det) > 1e-12f) {
++            const float inv[9] = {(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
++                                  (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det,
++                                  (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det};
++            const float x[3] = {world_view_projection[0], world_view_projection[4], world_view_projection[8]};
++            float r[3];
++            for (int k = 0; k < 3; ++k) {
++              r[k] = inv[k * 3] * x[0] + inv[k * 3 + 1] * x[1] + inv[k * 3 + 2] * x[2];
++            }
++            ui::vulkan::vr::TraceGpuCameraYaw(std::atan2(-r[2], r[0]) * 57.2958f);
++          }
++        }
 +      }
 +      // The same draw last frame (its shaders, vertices, indices and place among such draws): its own motion.
 +      uint64_t key = vertex_shader->ucode_data_hash() * 0x9E3779B97F4A7C15ull ^
@@ -3215,7 +3263,7 @@ index 53dcb7f..854698a 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4195,8 +5152,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4195,8 +5169,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->RangeWrittenByGpu(0, SharedMemory::kBufferSize);
    }
  
@@ -3226,7 +3274,7 @@ index 53dcb7f..854698a 100644
      uint32_t memexport_total_size = 0;
      for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
        memexport_total_size += memexport_range.size_bytes;
-@@ -4419,11 +5376,89 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4419,11 +5393,89 @@ bool VulkanCommandProcessor::IssueCopy() {
      return false;
    }
  
@@ -3318,7 +3366,7 @@ index 53dcb7f..854698a 100644
    }
  
    return IssueCopy_ReadbackResolvePath();
-@@ -4848,8 +5883,11 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
+@@ -4848,8 +5900,11 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
  void VulkanCommandProcessor::DisableHostOcclusionQueries() {
    if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
      if (BeginSubmission(true)) {
@@ -3330,7 +3378,7 @@ index 53dcb7f..854698a 100644
        EndSubmission(false);
      }
    }
-@@ -4993,6 +6031,16 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4993,6 +6048,16 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
  
    size_t fences_total = submissions_in_flight_fences_.size();
    size_t fences_awaited = 0;
@@ -3347,7 +3395,7 @@ index 53dcb7f..854698a 100644
    if (await_submission > submission_completed_) {
      // Await in a blocking way if requested.
      // TODO(Triang3l): Await only one fence. "Fence signal operations that are
-@@ -5000,9 +6048,24 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5000,9 +6065,24 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // synchronization scope all commands that occur earlier in submission
      // order."
      const uint64_t wait_start_us = CounterNowMicros();
@@ -3375,7 +3423,7 @@ index 53dcb7f..854698a 100644
      g_submission_counters[2].fetch_add(1, std::memory_order_relaxed);
      g_submission_counters[3].fetch_add(CounterNowMicros() - wait_start_us,
                                         std::memory_order_relaxed);
-@@ -5257,6 +6320,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5257,6 +6337,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      primitive_processor_->BeginFrame();
  
      texture_cache_->BeginFrame();
@@ -3383,7 +3431,7 @@ index 53dcb7f..854698a 100644
    }
  
    return true;
-@@ -5341,6 +6405,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5341,6 +6422,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -3391,7 +3439,7 @@ index 53dcb7f..854698a 100644
      EndRenderPass();
  
      pipeline_cache_->EndSubmission();
-@@ -5363,8 +6428,13 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5363,8 +6445,13 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
              sparse_buffer_bind_infos_temp_.emplace_back();
          sparse_buffer_bind_info.buffer = sparse_buffer_bind.buffer;
          sparse_buffer_bind_info.bindCount = sparse_buffer_bind.bind_count;
@@ -3406,7 +3454,7 @@ index 53dcb7f..854698a 100644
        }
        assert_false(semaphores_free_.empty());
        VkSemaphore bind_sparse_semaphore = semaphores_free_.back();
-@@ -5405,6 +6475,47 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5405,6 +6492,47 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
  
      assert_false(command_buffers_writable_.empty());
      CommandBuffer command_buffer = command_buffers_writable_.back();
@@ -3454,7 +3502,7 @@ index 53dcb7f..854698a 100644
      if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to reset a Vulkan command pool");
        return false;
-@@ -5418,6 +6529,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5418,6 +6546,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -3462,7 +3510,7 @@ index 53dcb7f..854698a 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5456,6 +6568,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5456,6 +6585,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        g_submission_counters[1].fetch_add(CounterNowMicros() - submit_start_us,
                                           std::memory_order_relaxed);
      }
@@ -3473,7 +3521,7 @@ index 53dcb7f..854698a 100644
      if (submit_result != VK_SUCCESS) {
        REXGPU_ERROR("Failed to submit a Vulkan command buffer");
        if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
-@@ -5479,6 +6595,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5479,6 +6612,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      fences_free_.pop_back();
  
      submission_open_ = false;
@@ -3481,7 +3529,7 @@ index 53dcb7f..854698a 100644
    }
  
    if (is_closing_frame) {
-@@ -5489,6 +6606,19 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5489,6 +6623,19 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      // Submission already closed now, so minus 1.
      closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] = GetCurrentSubmission() - 1;
  
@@ -3501,7 +3549,7 @@ index 53dcb7f..854698a 100644
      if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
        cache_clear_requested_ = false;
  
-@@ -5532,6 +6662,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+@@ -5532,6 +6679,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
  
    constants_transient_descriptors_free_.clear();
    constants_transient_descriptors_used_.clear();
@@ -3510,7 +3558,7 @@ index 53dcb7f..854698a 100644
    for (std::vector<VkDescriptorSet>& transient_descriptors_free :
         single_transient_descriptors_free_) {
      transient_descriptors_free.clear();
-@@ -6480,6 +7612,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6480,6 +7629,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferCount) - 1;
    assert_zero(current_constant_buffers_up_to_date_ & ~kAllConstantBuffersMask);
    if ((current_constant_buffers_up_to_date_ & kAllConstantBuffersMask) != kAllConstantBuffersMask) {
@@ -3518,7 +3566,7 @@ index 53dcb7f..854698a 100644
      current_graphics_descriptor_set_values_up_to_date_ &=
          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
      size_t uniform_buffer_alignment =
-@@ -6512,23 +7645,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6512,23 +7662,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        // dummy buffer.
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_vertex, UINT32_C(1));
@@ -3556,7 +3604,7 @@ index 53dcb7f..854698a 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6541,23 +7677,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6541,23 +7694,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
            current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFloatPixel];
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_pixel, UINT32_C(1));
@@ -3594,7 +3642,7 @@ index 53dcb7f..854698a 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6597,6 +7736,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6597,6 +7753,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                                << SpirvShaderTranslator::kConstantBufferFetch;
      }
@@ -3604,7 +3652,7 @@ index 53dcb7f..854698a 100644
    }
  
    // Textures and samplers.
-@@ -6640,6 +7782,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6640,6 +7799,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (texture_count_pixel || sampler_count_pixel) &&
        !(current_graphics_descriptor_set_values_up_to_date_ &
          (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
@@ -3617,7 +3665,7 @@ index 53dcb7f..854698a 100644
    descriptor_write_image_info_.clear();
    descriptor_write_image_info_.reserve(
        (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-@@ -6656,6 +7804,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6656,6 +7821,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -3629,7 +3677,7 @@ index 53dcb7f..854698a 100644
    size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_vertex_textures && sampler_count_vertex) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6676,6 +7829,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6676,6 +7846,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -3653,7 +3701,7 @@ index 53dcb7f..854698a 100644
    size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_pixel_textures && sampler_count_pixel) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6707,8 +7877,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6707,8 +7894,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        VkDescriptorPoolSize constants_descriptor_count;
        constants_descriptor_count.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
        constants_descriptor_count.descriptorCount = SpirvShaderTranslator::kConstantBufferCount;
@@ -3668,7 +3716,7 @@ index 53dcb7f..854698a 100644
        if (constants_descriptor_set == VK_NULL_HANDLE) {
          return false;
        }
-@@ -6724,7 +7898,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6724,7 +7915,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        write_constants.dstBinding = i;
        write_constants.dstArrayElement = 0;
        write_constants.descriptorCount = 1;
@@ -3678,7 +3726,7 @@ index 53dcb7f..854698a 100644
        write_constants.pImageInfo = nullptr;
        write_constants.pBufferInfo = &current_constant_buffer_infos_[i];
        write_constants.pTexelBufferView = nullptr;
-@@ -6732,6 +7907,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6732,6 +7924,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
          constants_descriptor_set;
@@ -3691,7 +3739,7 @@ index 53dcb7f..854698a 100644
    }
    // Vertex shader textures and samplers.
    if (write_vertex_textures) {
-@@ -6751,13 +7932,25 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6751,13 +7949,25 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
          write_textures[0].dstSet;
    }
    // Pixel shader textures and samplers.
@@ -3719,7 +3767,7 @@ index 53dcb7f..854698a 100644
          descriptor_write_image_info_.data() + pixel_sampler_image_info_offset, write_textures);
      if (!texture_descriptor_set_write_count) {
        return false;
-@@ -6781,7 +7974,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6781,7 +7991,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    if (!texture_count_vertex && !sampler_count_vertex) {
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
    }
@@ -3729,7 +3777,7 @@ index 53dcb7f..854698a 100644
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
    }
    uint32_t descriptor_sets_remaining =
-@@ -6790,21 +7984,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6790,21 +8001,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    while (rex::bit_scan_forward(descriptor_sets_remaining, &descriptor_set_index)) {
      uint32_t descriptor_set_mask_tzcnt =
          rex::tzcnt(~(descriptor_sets_remaining | ((UINT32_C(1) << descriptor_set_index) - 1)));
@@ -3785,7 +3833,7 @@ index 53dcb7f..854698a 100644
  uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
      bool is_vertex, uint32_t texture_count, uint32_t sampler_count,
      VkDescriptorSetLayout descriptor_set_layout, const VkDescriptorImageInfo* texture_image_info,
-@@ -6814,6 +8041,8 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6814,6 +8058,8 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
    if (!texture_count && !sampler_count) {
      return 0;
    }
@@ -3794,7 +3842,7 @@ index 53dcb7f..854698a 100644
    TextureDescriptorSetLayoutKey texture_descriptor_set_layout_key;
    texture_descriptor_set_layout_key.texture_count = texture_count;
    texture_descriptor_set_layout_key.sampler_count = sampler_count;
-@@ -6832,7 +8061,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6832,7 +8078,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
        VkDescriptorPoolSize& texture_descriptor_count =
            texture_descriptor_counts[texture_descriptor_counts_count++];
        texture_descriptor_count.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -3803,7 +3851,7 @@ index 53dcb7f..854698a 100644
      }
      if (sampler_count) {
        VkDescriptorPoolSize& texture_descriptor_count =
-@@ -6861,7 +8090,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6861,7 +8107,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
      descriptor_set_write.dstSet = texture_descriptor_set;
      descriptor_set_write.dstBinding = 0;
      descriptor_set_write.dstArrayElement = 0;
@@ -5909,7 +5957,7 @@ index ecbd940..2b5e8ab 100644
        // The swap texture is likely to be used only for the presentation
        // post-processing passes, and not during emulation where it'd be used in
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
-index 813bb1c..af61320 100644
+index 813bb1c..4610043 100644
 --- a/src/input/input_system.cpp
 +++ b/src/input/input_system.cpp
 @@ -11,6 +11,12 @@
@@ -5925,7 +5973,7 @@ index 813bb1c..af61320 100644
  
  #include <rex/dbg.h>
  #include <rex/input/device_assignment.h>
-@@ -212,6 +218,78 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+@@ -212,6 +218,84 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
    return driver->GetDeviceCapabilities(chosen, flags, out_caps);
  }
  
@@ -6001,10 +6049,16 @@ index 813bb1c..af61320 100644
 +
 +}  // namespace
 +
++namespace {
++void (*button_pressed_hook)(uint16_t button) = nullptr;
++}  // namespace
++
++void SetButtonPressedHook(void (*hook)(uint16_t button)) { button_pressed_hook = hook; }
++
  X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
    SCOPE_profile_cpu_f("hid");
    if (!assignment_) {
-@@ -242,6 +320,11 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+@@ -242,6 +326,22 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
      }
    }
  
@@ -6013,11 +6067,22 @@ index 813bb1c..af61320 100644
 +    merged.packet_number = ++packet;
 +    any = true;
 +  }
++  if (user_index == 0) {  // VR fork: buttons going down (SetButtonPressedHook)
++    static uint16_t buttons_were = 0;
++    const uint16_t buttons = any ? uint16_t(merged.gamepad.buttons) : 0;
++    const uint16_t pressed = buttons & ~buttons_were;
++    buttons_were = buttons;
++    for (uint16_t bit = 1; pressed && button_pressed_hook && bit; bit <<= 1) {
++      if (pressed & bit) {
++        button_pressed_hook(bit);
++      }
++    }
++  }
    if (!any) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_video.cpp b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
-index 1254710..1806179 100644
+index 1254710..c28db84 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_video.cpp
 +++ b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
 @@ -16,6 +16,7 @@
@@ -6028,15 +6093,15 @@ index 1254710..1806179 100644
  #include <rex/cvar.h>
  #include <rex/graphics/pipeline/texture/info.h>
  #include <rex/graphics/register_file.h>
-@@ -445,6 +446,8 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
-                   mapped_u32 frontbuffer_ptr,  // ptr to frontbuffer address
-                   mapped_u32 texture_format_ptr, mapped_u32 color_space_ptr, mapped_u32 width,
-                   mapped_u32 height) {
-+  rex::ui::vulkan::vr::OnGameSwap();  // VR fork: the frame's head pose goes with its swap packet
-+
-   // All of these parameters are REQUIRED.
-   assert(buffer_ptr);
-   assert(fetch_ptr);
+@@ -478,6 +479,8 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
+     return;
+   }
+   gpu_fetch.base_address = frontbuffer_physical_address >> 12;
++  // VR fork: the frame's head pose goes with its swap packet (matched on the GPU thread by this frontbuffer).
++  rex::ui::vulkan::vr::OnGameSwap(frontbuffer_physical_address);
+ 
+   auto texture_format = rex::graphics::xenos::TextureFormat(texture_format_ptr.value());
+   auto color_space = *color_space_ptr;
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index 5e450f4..fac8ba6 100644
 --- a/src/ui/CMakeLists.txt
@@ -7212,10 +7277,10 @@ index 0000000..baf710c
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..d3f79d5
+index 0000000..bf921e0
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1645 @@
+@@ -0,0 +1,1735 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -7233,6 +7298,7 @@ index 0000000..d3f79d5
 +#include <cstring>
 +#include <deque>
 +#include <mutex>
++#include <map>
 +#include <optional>
 +#include <string>
 +#include <thread>
@@ -7462,9 +7528,17 @@ index 0000000..d3f79d5
 +  struct SwapPose {
 +    bool posed;
 +    float pose[16], tangents[4];
++    uint32_t frontbuffer = 0;  // the physical address its swap packet presents
 +  };
 +  std::deque<SwapPose> swap_poses;
 +  SwapPose gpu_pose{};  // the GPU thread's: the frame being presented
++  // The pose the camera hook last put in the camera (update thread), and the one a frame's scene was drawn with (the
++  // GPU thread, at its first head-tracked draw): SceneDrawStarted.
++  std::mutex camera_mutex;
++  bool camera_posed = false;
++  float camera_pose[16]{}, camera_tangents[4]{};
++  bool drawn_posed = false;
++  float drawn_pose[16]{}, drawn_tangents[4]{};
 +
 +  // The head for the game's next frame.
 +  std::mutex head_mutex;
@@ -7927,6 +8001,25 @@ index 0000000..d3f79d5
 +}
 +
 +// The head in the seat's space at the predicted display time, and the eyes' fields of view, for the camera.
++// VR fork, development (MCLA_VR_POSE_TRACE=1): the head yaw (from a pose's z row) at each stage, when it changes.
++std::atomic<uint32_t> g_vr_gpu_swaps{0};  // development: the pose trace's frame numbers
++
++void PoseTrace(const char* stage, const float* pose) {
++  static const bool on = std::getenv("MCLA_VR_POSE_TRACE") && std::getenv("MCLA_VR_POSE_TRACE")[0] == '1';
++  if (!on) {
++    return;
++  }
++  static std::mutex mutex;
++  static std::map<std::string, float> last;
++  const float yaw = std::atan2(pose[8], pose[10]) * 57.2958f;
++  std::scoped_lock lock{mutex};
++  auto& l = last[stage];
++  if (std::fabs(l - yaw) > 0.05f) {
++    l = yaw;
++    Log("pose trace %s yaw %.2f (GPU swaps so far %u)", stage, yaw, g_vr_gpu_swaps.load());
++  }
++}
++
 +void UpdateHead() {
 +  XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
 +  if (!XR_SUCCEEDED(g.xr.LocateSpace(g.view_space, g.local_space, g.frame_state.predictedDisplayTime, &location)) ||
@@ -7986,6 +8079,7 @@ index 0000000..d3f79d5
 +        std::tan(views[0].fov.angleDown), std::tan(views[1].fov.angleLeft), std::tan(views[1].fov.angleRight),
 +        std::tan(views[1].fov.angleUp), std::tan(views[1].fov.angleDown));
 +  }
++  PoseTrace("0 UpdateHead", pose);
 +  std::scoped_lock lock{g.head_mutex};
 +  std::memcpy(g.head_pose, pose, sizeof(pose));
 +  std::memcpy(g.head_tangents, tangents, sizeof(tangents));
@@ -8156,6 +8250,7 @@ index 0000000..d3f79d5
 +  SubmitCommand(cmd, p);
 +  g.shown_posed = p.posed;
 +  std::memcpy(g.shown_pose, p.pose, sizeof(g.shown_pose));
++  PoseTrace("5 headset Show", g.shown_pose);
 +  std::memcpy(g.shown_tangents, p.tangents, sizeof(g.shown_tangents));
 +  {
 +    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -8801,6 +8896,30 @@ index 0000000..d3f79d5
 +
 +void Recenter() { g.recenter_requested = true; }
 +
++bool ShowingGameplay() { return g.shown_posed && g.shown_hud; }  // the title is head-tracked too, without the HUD layer
++
++void NoteCameraPose(const float (&pose)[16], const float (&tangents)[4]) {
++  std::scoped_lock lock{g.camera_mutex};
++  std::memcpy(g.camera_pose, pose, sizeof(g.camera_pose));
++  std::memcpy(g.camera_tangents, tangents, sizeof(g.camera_tangents));
++  g.camera_posed = true;
++}
++
++void SceneDrawStarted() {
++  std::scoped_lock lock{g.camera_mutex};
++  if (!g.camera_posed) {
++    return;
++  }
++  std::memcpy(g.drawn_pose, g.camera_pose, sizeof(g.drawn_pose));
++  std::memcpy(g.drawn_tangents, g.camera_tangents, sizeof(g.drawn_tangents));
++  g.drawn_posed = true;
++}
++
++void TraceGpuCameraYaw(float yaw) {
++  const float pose[16] = {0, 0, 0, 0, 0, 0, 0, 0, std::sin(yaw / 57.2958f), 0, std::cos(yaw / 57.2958f)};
++  PoseTrace("3b GPU draws the scene", pose);
++}
++
 +float EyeShift(int eye) {
 +  const float shift = g.eye_shift.load(std::memory_order_relaxed);
 +  return eye ? -shift : shift;
@@ -8815,20 +8934,23 @@ index 0000000..d3f79d5
 +}
 +
 +void SetFramePose(const float (&pose)[16], const float (&tangents)[4]) {
++  PoseTrace("2 render-thread SetFramePose", pose);
 +  std::scoped_lock lock{g.pose_mutex};
 +  std::memcpy(g.frame_pose, pose, sizeof(g.frame_pose));
 +  std::memcpy(g.frame_tangents, tangents, sizeof(g.frame_tangents));
 +  g.frame_posed = true;
 +}
 +
-+void OnGameSwap() {
++void OnGameSwap(uint32_t frontbuffer) {
 +  if (!Active()) {
 +    return;
 +  }
 +  PaceSwap();
 +  std::scoped_lock lock{g.pose_mutex};
 +  State::SwapPose swap{g.frame_posed};
++  swap.frontbuffer = frontbuffer & 0x1FFFFFFF;
 +  std::memcpy(swap.pose, g.frame_pose, sizeof(swap.pose));
++  PoseTrace("3 VdSwap", swap.pose);
 +  std::memcpy(swap.tangents, g.frame_tangents, sizeof(swap.tangents));
 +  g.frame_posed = false;  // the next frame sets its own (a frame without the camera hook goes to the screen)
 +  g.swap_poses.push_back(swap);
@@ -8837,17 +8959,49 @@ index 0000000..d3f79d5
 +  }
 +}
 +
-+void OnGpuSwap() {
++void OnGpuSwap(uint32_t frontbuffer) {
 +  if (!Active()) {
 +    return;
 +  }
++  ++g_vr_gpu_swaps;
++  frontbuffer &= 0x1FFFFFFF;
 +  std::scoped_lock lock{g.pose_mutex};
-+  if (g.swap_poses.empty()) {
-+    g.gpu_pose.posed = false;
-+    return;
++  // The pose queued for this packet's frontbuffer; entries before it are swaps that never reached the GPU (dropped).
++  size_t match = g.swap_poses.size();
++  for (size_t i = 0; i < g.swap_poses.size(); ++i) {
++    if (g.swap_poses[i].frontbuffer == frontbuffer) {
++      match = i;
++      break;
++    }
 +  }
-+  g.gpu_pose = g.swap_poses.front();
-+  g.swap_poses.pop_front();
++  if (match == g.swap_poses.size()) {
++    if (g.swap_poses.empty()) {
++      g.gpu_pose.posed = false;
++      return;
++    }
++    match = 0;  // no entry for this frontbuffer: in order (the old pairing)
++  }
++  if (match) {
++    static uint32_t logged = 0;
++    if (logged++ < 10) {
++      Log("pose queue: %u swaps before this frontbuffer's dropped (they never reached the GPU)", uint32_t(match));
++    }
++  }
++  g.gpu_pose = g.swap_poses[match];
++  {  // the pose the frame's scene was actually drawn with (SceneDrawStarted)
++    static const bool from_gpu = [] {
++      const char* v = std::getenv("MCLA_VR_POSE_FROM_GPU");
++      return !(v && v[0] == '0');
++    }();
++    std::scoped_lock camera_lock{g.camera_mutex};
++    if (from_gpu && g.drawn_posed && g.gpu_pose.posed) {
++      std::memcpy(g.gpu_pose.pose, g.drawn_pose, sizeof(g.gpu_pose.pose));
++      std::memcpy(g.gpu_pose.tangents, g.drawn_tangents, sizeof(g.gpu_pose.tangents));
++    }
++    g.drawn_posed = false;
++  }
++  PoseTrace("4 GPU swap", g.gpu_pose.pose);
++  g.swap_poses.erase(g.swap_poses.begin(), g.swap_poses.begin() + ptrdiff_t(match) + 1);
 +}
 +
 +bool HeadPose(float (&pose)[16], float (&tangents)[4]) {
@@ -8856,6 +9010,7 @@ index 0000000..d3f79d5
 +    return false;
 +  }
 +  std::memcpy(pose, g.head_pose, sizeof(pose));
++  PoseTrace("1 camera HeadPose", pose);
 +  std::memcpy(tangents, g.head_tangents, sizeof(tangents));
 +  return true;
 +}

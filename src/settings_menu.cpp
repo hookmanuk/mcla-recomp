@@ -518,11 +518,11 @@ void VrResolutionLabels() {
 }
 
 // The size an eye sent to the headset: the render size (no anti-aliasing, the game's MSAA at the next start, or DLSS's
-// anti-aliasing) or an upscale of it by DLSS, each factor labelled with the size it makes from the render size the
+// anti-aliasing) or an upscale of it by DLSS (up to 2x), each factor labelled with the size it makes from the render size the
 // game started with; only sizes up to 7680 on a side are listed (VrHeadsetLabels sets the count). DLSS needs an NVIDIA
 // RTX GPU: without it those say NO RTX.
-constexpr int kVrHeadsetMax = 9;
-const char* kVrHeadsetValues[kVrHeadsetMax] = {"noaa", "msaa", "dlaa", "1.25", "1.5", "1.75", "2", "2.5", "3"};
+constexpr int kVrHeadsetMax = 7;
+const char* kVrHeadsetValues[kVrHeadsetMax] = {"noaa", "msaa", "dlaa", "1.25", "1.5", "1.75", "2"};
 const char* kVrHeadsetLabels[kVrHeadsetMax] = {"NO AA", "MSAA (RESTART)", "DLAA"};
 
 ItemDef kVrItems[] = {
@@ -534,7 +534,7 @@ ItemDef kVrItems[] = {
 
 void VrHeadsetLabels() {
   static std::string labels[kVrHeadsetMax];
-  static const double kFactors[] = {1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
+  static const double kFactors[] = {1.25, 1.5, 1.75, 2.0};  // up to 2x (Matt 2026-10-27)
   const bool ready = rex::ui::vulkan::vr::dlss::Ready();
   const int render_width = 1280 * std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()));
   const int render_height = 720 * std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_y").c_str()));
@@ -1192,3 +1192,18 @@ void mcla_dof_composite(PPCRegister& r3) {
   }
   std::memset(Membase() + r3.u32 + 0xF0, 0, 16);
 }
+
+// VR fork, development: the menu engine's stack (node + 776) as raw dwords, to find the pause menu's state.
+void VrLogMenuStack(const char* why) {
+  const uint32_t node = MenuRootNode();
+  if (!node) {
+    REXLOG_INFO("menu stack ({}): no root", why);
+    return;
+  }
+  REXLOG_INFO("menu stack ({}): {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}, active submenu {}", why, Read32(node + 776),
+              Read32(node + 780), Read32(node + 784), Read32(node + 788), Read32(node + 792), Read32(node + 796),
+              g_active_menu.load(std::memory_order_relaxed));
+}
+
+// The pause menu is open: not known yet (VrLogMenuStack finds it).
+bool VrPauseMenuOpen() { return false; }
