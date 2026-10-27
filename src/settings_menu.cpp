@@ -15,6 +15,7 @@
 #include "mcla_app.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1016,7 +1017,10 @@ bool NodeReachesList(uint32_t node, uint32_t list, int depth, int& budget) {
 
 // --- Hooks -------------------------------------------------------------------
 
+void VrPauseMenuBuilt();  // VR fork, below
+
 void mcla_menu_capture_continue(PPCRegister& r3) {
+  VrPauseMenuBuilt();
   if (r3.u32) {
     if (uint32_t pause_tab = Read32(r3.u32 + 32)) {
       g_pause_tab.store(pause_tab, std::memory_order_relaxed);
@@ -1106,8 +1110,30 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
   return false;
 }
 
+// VR fork: whether the pause menu is open (VrPauseMenuOpen): the game builds it when it opens (the capture hook) and
+// cancels it when it closes (B, or Start again), building it again straight after; a build within 100 ms of a cancel
+// is that one, not an open.
+std::atomic<bool> g_vr_pause_open{false};
+std::atomic<int64_t> g_vr_pause_cancel_ms{0};
+
+int64_t VrNowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void VrPauseMenuBuilt() {
+  if (VrNowMs() - g_vr_pause_cancel_ms.load() > 100 && !g_vr_pause_open.exchange(true)) {
+    REXLOG_INFO("VR: pause menu open");
+  }
+}
+
 bool mcla_menu_cancel(PPCRegister& r31) {
-  (void)r31;
+  if (g_active_menu.load(std::memory_order_relaxed) < 0) {  // outside our submenus: the pause menu closes
+    g_vr_pause_cancel_ms = VrNowMs();
+    if (g_vr_pause_open.exchange(false)) {
+      REXLOG_INFO("VR: pause menu closed");
+    }
+  }
   if (g_active_menu.exchange(-1, std::memory_order_relaxed) < 0) {
     return false;
   }
@@ -1193,17 +1219,5 @@ void mcla_dof_composite(PPCRegister& r3) {
   std::memset(Membase() + r3.u32 + 0xF0, 0, 16);
 }
 
-// VR fork, development: the menu engine's stack (node + 776) as raw dwords, to find the pause menu's state.
-void VrLogMenuStack(const char* why) {
-  const uint32_t node = MenuRootNode();
-  if (!node) {
-    REXLOG_INFO("menu stack ({}): no root", why);
-    return;
-  }
-  REXLOG_INFO("menu stack ({}): {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}, active submenu {}", why, Read32(node + 776),
-              Read32(node + 780), Read32(node + 784), Read32(node + 788), Read32(node + 792), Read32(node + 796),
-              g_active_menu.load(std::memory_order_relaxed));
-}
-
-// The pause menu is open: not known yet (VrLogMenuStack finds it).
-bool VrPauseMenuOpen() { return false; }
+// VR fork: Back in the pause menu recentres the headset (perf_options.cpp).
+bool VrPauseMenuOpen() { return g_vr_pause_open.load(); }

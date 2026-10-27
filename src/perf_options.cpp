@@ -362,8 +362,7 @@ bool VrRequested() {
 namespace rex::input {
 void SetButtonPressedHook(void (*hook)(uint16_t button));  // rexglue input_system
 }
-void VrLogMenuStack(const char* why);  // settings_menu.cpp, development
-bool VrPauseMenuOpen();                // settings_menu.cpp
+bool VrPauseMenuOpen();  // settings_menu.cpp
 namespace rex::ui::vulkan::vr {
 void Recenter();  // rexglue vr_openxr
 bool ShowingGameplay();
@@ -376,13 +375,11 @@ void MclaConfigureGpuDefaults() {
     // Back in the pause menu recentres too (Matt 2026-10-27).
     rex::input::SetButtonPressedHook([](uint16_t button) {
       if (button == 0x0010 /* START */) {
-        VrLogMenuStack("start");
         if (!rex::ui::vulkan::vr::ShowingGameplay()) {
           rex::ui::vulkan::vr::Recenter();
           REXLOG_INFO("VR: recentred (Start outside gameplay)");
         }
       } else if (button == 0x0020 /* BACK */) {
-        VrLogMenuStack("back");
         if (VrPauseMenuOpen()) {
           rex::ui::vulkan::vr::Recenter();
           REXLOG_INFO("VR: recentred (Back in the pause menu)");
