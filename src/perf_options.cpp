@@ -311,12 +311,13 @@ void TickAbTest() {
 // Default 2560x2880 with no anti-aliasing (Matt 2026-10-27: "thats the best setting and should be the default"; it
 // held 72 FPS where DLAA ran 67 and MSAA 57). A card without the memory gets a smaller size at start (vr_twins.cpp).
 REXCVAR_DEFINE_STRING(vr_resolution, "2x4", "VR",
-                      "VR render size an eye: 1x2 (1280x1440), 2x4 (2560x2880) or 3x6 (3840x4320)");
+                      "VR render size an eye as the draw scale XxY on 1280x720: 1x2 (1280x1440), 2x3 (2560x2160), 2x4 "
+                      "(2560x2880), 3x5 (3840x3600) or 3x6 (3840x4320)");
 REXCVAR_DEFINE_STRING(vr_headset_size, "noaa", "VR",
                       "VR size an eye sent to the headset: noaa (the render size, no anti-aliasing), msaa (the render "
-                      "size, the game's MSAA; next start), dlaa (the render size, DLSS anti-aliasing) or WxH, DLSS "
-                      "upscaling the render size to it (at most 3x; at or below the render size: DLAA). DLSS needs an "
-                      "NVIDIA RTX GPU");
+                      "size, the game's MSAA; next start), dlaa (the render size, DLSS anti-aliasing) or an upscale "
+                      "factor of the render size, 1.25 to 3 (DLSS; at most 7680 on a side). DLSS needs an NVIDIA RTX "
+                      "GPU");
 
 // The headset sizes the render size goes out at unchanged, DLSS loaded but not used (vr_dlss_bypass, live).
 bool VrHeadsetBypassesDlss(const std::string& headset) {
@@ -332,7 +333,13 @@ double VrHeadsetUpscale() {
   }
   const double render_width =
       1280.0 * std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()));
-  return std::clamp(double(std::atoi(headset.c_str())) / render_width, 1.0, 3.0);
+  const double render_height =
+      720.0 * std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_y").c_str()));
+  // A factor ("1.5"), or an earlier saved width ("3200x3600": over the render width).
+  const double upscale = headset.find('x') != std::string::npos ? std::atof(headset.c_str()) / render_width
+                                                                  : std::atof(headset.c_str());
+  // At most 7680 on a side (DLSS's and the headsets' sizes).
+  return std::clamp(upscale, 1.0, std::max(1.0, std::min(3.0, 7680.0 / std::max(render_width, render_height))));
 }
 
 // The headset size into DLSS's output scale (unless the command line set it): at start, and from the settings menu
@@ -371,12 +378,13 @@ void MclaConfigureGpuDefaults() {
     const auto from_command_line = [](const char* name) {
       return rex::cvar::GetFlagSource(name) == rex::cvar::Source::kCommandLine;
     };
-    const std::string resolution = REXCVAR_GET(vr_resolution);
-    const char* scale_x = resolution == "2x4" ? "2" : resolution == "3x6" ? "3" : "1";
-    const char* scale_y = resolution == "2x4" ? "4" : resolution == "3x6" ? "6" : "2";
+    const std::string resolution = REXCVAR_GET(vr_resolution);  // "XxY", each 1 to 7
+    const size_t cross = resolution.find('x');
+    const int scale_x = cross != std::string::npos ? std::clamp(std::atoi(resolution.c_str()), 1, 7) : 2;
+    const int scale_y = cross != std::string::npos ? std::clamp(std::atoi(resolution.c_str() + cross + 1), 1, 7) : 4;
     if (!from_command_line("draw_resolution_scale_x") && !from_command_line("draw_resolution_scale_y")) {
-      rex::cvar::SetFlagByName("draw_resolution_scale_x", scale_x);
-      rex::cvar::SetFlagByName("draw_resolution_scale_y", scale_y);
+      rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(scale_x).c_str());
+      rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(scale_y).c_str());
     }
     const std::string headset = REXCVAR_GET(vr_headset_size);
     const uint32_t render_width = 1280 * uint32_t(std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()));
