@@ -483,7 +483,7 @@ index 9d2a848..9f44a03 100644
  
  }  // namespace rex::graphics::vulkan
 diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
-index 34f7033..1abf89d 100644
+index 34f7033..872a10e 100644
 --- a/include/rex/graphics/vulkan/render_target_cache.h
 +++ b/include/rex/graphics/vulkan/render_target_cache.h
 @@ -32,6 +32,31 @@ class VulkanCommandProcessor;
@@ -549,13 +549,15 @@ index 34f7033..1abf89d 100644
    void GetLastUpdateRenderingAttachments(VkRenderingAttachmentInfo* color_attachments,
                                           uint32_t* color_attachment_count_out,
                                           VkRenderingAttachmentInfo* depth_attachment,
-@@ -177,6 +219,21 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -177,6 +219,23 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
    void RequestPixelShaderInterlockBarrier() override;
  
   private:
 +  bool vr_clear_cutout_valid_ = false;  // VR fork: VrSetClearCutout
 +  Transfer::Rectangle vr_clear_cutout_{};
 +  uint32_t vr_clear_targets_ = 0;
++  // VR fork: textures direct resolves wrote whole, and the frame (VrDirectResolve: they keep no memory path).
++  std::unordered_map<const void*, uint64_t> vr_whole_written_;
 +  bool vr_clear_depth_known_ = false;
 +  float vr_clear_depth_ = 0.f;
 +  uint32_t vr_clear_stencil_ = 0;
@@ -571,7 +573,7 @@ index 34f7033..1abf89d 100644
    enum class EdramBufferUsage {
      // There's no need for combined fragment and compute usages.
      // With host render targets, the usual usage sequence is as follows:
-@@ -262,6 +319,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -262,6 +321,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
        EdramBufferModificationStatus::kUnmodified;
    VkDescriptorPool edram_storage_buffer_descriptor_pool_ = VK_NULL_HANDLE;
    VkDescriptorSet edram_storage_buffer_descriptor_set_;
@@ -582,7 +584,7 @@ index 34f7033..1abf89d 100644
  
    VkPipelineLayout resolve_copy_pipeline_layout_ = VK_NULL_HANDLE;
    static const ResolveCopyShaderCode
-@@ -379,6 +440,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -379,6 +442,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
      // 2 sampled images for depth / stencil, 1 sampled image for color.
      size_t descriptor_set_index_transfer_source_;
  
@@ -599,7 +601,7 @@ index 34f7033..1abf89d 100644
      VkPipelineStageFlags current_stage_mask_ = 0;
      VkAccessFlags current_access_mask_ = 0;
      VkImageLayout current_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-@@ -871,6 +942,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -871,6 +944,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
    uint64_t direct_resolve_success_count_ = 0;
    uint64_t direct_resolve_fallback_count_ = 0;
  
@@ -4227,7 +4229,7 @@ index 6181d9e..e19031f 100644
    pipeline_create_info.stageCount = shader_stage_count;
    pipeline_create_info.pStages = shader_stages.data();
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index 0298f06..016ca1c 100644
+index 0298f06..aa05bc9 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -10,7 +10,15 @@
@@ -5281,7 +5283,7 @@ index 0298f06..016ca1c 100644
      // Perform the clear.
      if (resolve_clear_needed) {
        command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-@@ -5971,6 +6611,549 @@ VkPipeline VulkanRenderTargetCache::GetDirectResolvePipeline(DirectResolvePipeli
+@@ -5971,6 +6611,568 @@ VkPipeline VulkanRenderTargetCache::GetDirectResolvePipeline(DirectResolvePipeli
    return pipeline;
  }
  
@@ -5581,6 +5583,19 @@ index 0298f06..016ca1c 100644
 +    const auto& tex_key = texture->key();
 +    const xenos::TextureFormat dest_format = tex_key.format;
 +    const auto skip = [&](const std::string& why) {
++      // A texture its own direct resolves write whole every frame (another image taking turns with this one in
++      // the same memory: MCLA's 224x224 at the scene's address) does not keep the memory path for this resolve:
++      // its content comes from its own resolve, not this memory. If it is ever loaded from memory a direct resolve
++      // left unwritten, those pages turn to the memory path (STALE load). MCLA_VR_DIRECT_OWN=0: every one counts.
++      static const bool vr_ignore_own =
++          !(std::getenv("MCLA_VR_DIRECT_OWN") && std::getenv("MCLA_VR_DIRECT_OWN")[0] == '0');
++      if (vr_ignore_own) {
++        const auto it = vr_whole_written_.find(texture);
++        if (it != vr_whole_written_.end() && it->second + 1 >= command_processor_.GetCurrentFrame()) {
++          ++g_vr_direct_fallbacks["a texture its own resolves write left out: " + why];
++          return;
++        }
++      }
 +      vr_direct_memory_needed_ = true;
 +      g_vr_direct_reason = "direct, memory: kept " + why;
 +      ++g_vr_direct_fallbacks["a texture kept on the memory path: " + why];
@@ -5807,6 +5822,9 @@ index 0298f06..016ca1c 100644
 +  vr_direct_textures_.push_back(texture);
 +  vr_direct_resolved_image_ = texture->image();
 +  ++written;
++  if (!partial) {
++    vr_whole_written_[texture] = command_processor_.GetCurrentFrame();
++  }
 +  if (partial && sub_whole && VrDirectResolveMode() == 2) {
 +    static std::unordered_map<void*, std::pair<uint64_t, uint64_t>> covered;  // frame, area written this frame
 +    auto& [frame, area] = covered[texture];
@@ -5818,6 +5836,9 @@ index 0298f06..016ca1c 100644
 +    if ((texture->outdated_mask() & 1u) && area >= uint64_t(tex_key.GetWidth()) * tex_key.GetHeight()) {
 +      texture_cache.VrMakeTextureUpToDate(texture);
 +      ++g_vr_direct_fallbacks["(made up to date by the frame's sub-texture resolves)"];
++    }
++    if (area >= uint64_t(tex_key.GetWidth()) * tex_key.GetHeight()) {
++      vr_whole_written_[texture] = command_processor_.GetCurrentFrame();
 +    }
 +  }
 +  }  // for each texture at the page
@@ -5831,7 +5852,7 @@ index 0298f06..016ca1c 100644
  bool VulkanRenderTargetCache::TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
                                                       draw_util::ResolveCopyShaderIndex copy_shader,
                                                       bool draw_resolution_scaled) {
-@@ -6023,6 +7206,10 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
+@@ -6023,6 +7225,10 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
                                                  uint32_t dump_rows, uint32_t dump_pitch) {
    assert_true(GetPath() == Path::kHostRenderTargets);
  
@@ -5842,7 +5863,7 @@ index 0298f06..016ca1c 100644
    GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch,
                                   dump_rectangles_);
    if (dump_rectangles_.empty()) {
-@@ -6136,6 +7323,11 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
+@@ -6136,6 +7342,11 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
                                            sizeof(last_offsets), &last_offsets);
        }
        command_processor_.SubmitBarriers(true);
@@ -5854,7 +5875,7 @@ index 0298f06..016ca1c 100644
        command_buffer.CmdVkDispatch(
            (draw_resolution_scale_x() *
                 (xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) *
-@@ -6152,4 +7344,19 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
+@@ -6152,4 +7363,19 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
    return all_pipelines_available;
  }
  
