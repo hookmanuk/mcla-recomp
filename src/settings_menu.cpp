@@ -22,6 +22,10 @@
 #include <filesystem>
 #include <string>
 
+#include <algorithm>
+#include <fstream>
+#include <mutex>
+#include <vector>
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
@@ -38,6 +42,11 @@ REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
 // Set by a host that keeps the settings file somewhere other than next to
 // the executable (PS5).
 const char* g_mcla_settings_path = nullptr;
+
+namespace rex::ui::vulkan::vr {
+double VideoMemoryTotalGB();  // rexglue vr_twins
+double VideoMemoryNeededGB(uint32_t scale_area);
+}  // namespace rex::ui::vulkan::vr
 
 namespace {
 
@@ -339,9 +348,64 @@ std::string OptionGet(const char* name) {
   return rex::cvar::GetFlagByName(name);
 }
 
+std::mutex g_changed_mutex;
+std::vector<std::string> g_changed_options;  // set in the menu since the last save
+
 void OptionSet(const char* name, const char* value) {
   REXLOG_INFO("settings menu: {} = {}", name, value);
   rex::cvar::SetFlagByName(name, value);
+  std::lock_guard lock(g_changed_mutex);
+  if (std::find(g_changed_options.begin(), g_changed_options.end(), name) == g_changed_options.end()) {
+    g_changed_options.emplace_back(name);
+  }
+}
+
+// The menu's options into the settings file: each changed one replaces its line or is added; every other line stays.
+void SaveChangedOptions(const std::filesystem::path& path) {
+  std::vector<std::string> changed;
+  {
+    std::lock_guard lock(g_changed_mutex);
+    changed.swap(g_changed_options);
+  }
+  if (changed.empty()) {
+    return;
+  }
+  std::vector<std::string> lines;
+  {
+    std::ifstream in(path);
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      lines.push_back(line);
+    }
+  }
+  if (lines.empty()) {
+    lines.emplace_back("# MCLA settings (the in-game settings menu writes what it changes)");
+  }
+  for (const std::string& name : changed) {
+    const std::string value = rex::cvar::GetFlagByName(name);
+    const bool bare = value == "true" || value == "false" ||
+                      (!value.empty() && value.find_first_not_of("0123456789.-") == std::string::npos);
+    const std::string line = name + " = " + (bare ? value : "\"" + value + "\"");
+    bool replaced = false;
+    for (std::string& existing : lines) {
+      const size_t key_end = existing.find_first_of(" =");
+      if (key_end != std::string::npos && existing.compare(0, key_end, name) == 0 &&
+          existing.find('=') != std::string::npos) {
+        existing = line;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      lines.push_back(line);
+    }
+  }
+  std::ofstream out(path, std::ios::trunc);
+  for (const std::string& line : lines) {
+    out << line << "\n";
+  }
 }
 
 enum class ItemKind { kToggle, kStringChoice, kNumberChoice };
@@ -418,6 +482,43 @@ const ItemDef kPerformanceItems[] = {
     {"PM_MxMsaa", ItemKind::kToggle, "mcla_msaa", "ANTI ALIASING (NEXT START)"},
 };
 
+// VR: the render size an eye (a draw resolution scale on 1280x720) and the DLSS mode (its upscale to the headset);
+// both are read at start (perf_options.cpp). The headset gets the render size times the upscale.
+constexpr const char* kVrResolutionValues[] = {"1x2", "2x4", "3x6"};
+// Each with the video memory it needs and the card's (filled when the menu is made: VrResolutionLabels), so a
+// choice the card cannot hold says so before it is applied (at start the game would lower it: vr_twins.cpp).
+const char* kVrResolutionLabels[] = {"1280 X 1440", "2560 X 2880", "3840 X 4320"};
+
+void VrResolutionLabels() {
+  static std::string labels[3];
+  static const char* const kSizes[] = {"1280 X 1440", "2560 X 2880", "3840 X 4320"};
+  static const uint32_t kAreas[] = {2, 8, 18};
+  const double total = rex::ui::vulkan::vr::VideoMemoryTotalGB();
+  for (int i = 0; i < 3; ++i) {
+    const double needed = rex::ui::vulkan::vr::VideoMemoryNeededGB(kAreas[i]);
+    char text[96];
+    if (total <= 0.0) {
+      std::snprintf(text, sizeof text, "%s (NEEDS %.0f GB)", kSizes[i], needed);
+    } else if (needed + 2.0 > total) {
+      std::snprintf(text, sizeof text, "%s (NEEDS %.0f GB OF %.0f  TOO MUCH)", kSizes[i], needed, total);
+    } else {
+      std::snprintf(text, sizeof text, "%s (NEEDS %.0f GB OF %.0f)", kSizes[i], needed, total);
+    }
+    labels[i] = text;
+    kVrResolutionLabels[i] = labels[i].c_str();
+  }
+}
+constexpr const char* kVrDlssValues[] = {"off", "dlaa", "quality", "balanced", "performance", "ultra"};
+constexpr const char* kVrDlssLabels[] = {"OFF",          "DLAA (1X)",        "QUALITY (1.5X)",
+                                         "BALANCED (1.72X)", "PERFORMANCE (2X)", "ULTRA PERFORMANCE (3X)"};
+
+const ItemDef kVrItems[] = {
+    {"PM_MxVrRes", ItemKind::kStringChoice, "vr_resolution", "RENDER SIZE AN EYE (NEXT START)",
+     kVrResolutionValues, kVrResolutionLabels, nullptr, 3},
+    {"PM_MxVrDlss", ItemKind::kStringChoice, "vr_dlss_mode", "DLSS (NEXT START)", kVrDlssValues, kVrDlssLabels,
+     nullptr, 6},
+};
+
 const ItemDef kControlItems[] = {
     {"PM_MxPrompts", ItemKind::kStringChoice, "mcla_button_prompts", "BUTTON PROMPTS",
      kPromptValues, kPromptLabels, nullptr, 3},
@@ -440,6 +541,7 @@ const MenuDef kMenus[] = {
      int(sizeof(kPerformanceItems) / sizeof(kPerformanceItems[0]))},
     {"PM_MxTabControls", "CONTROLS", "MxControlsMenu", kControlItems,
      int(sizeof(kControlItems) / sizeof(kControlItems[0]))},
+    {"PM_MxTabVr", "VR", "MxVrMenu", kVrItems, int(sizeof(kVrItems) / sizeof(kVrItems[0]))},
 };
 constexpr int kMenuCount = int(sizeof(kMenus) / sizeof(kMenus[0]));
 constexpr int kMaxRows = 16;
@@ -780,7 +882,7 @@ void SaveSettingsIfChanged() {
   const auto path = g_mcla_settings_path
                         ? std::filesystem::path(g_mcla_settings_path)
                         : rex::filesystem::GetExecutableFolder() / "mcla.toml";
-  rex::cvar::SaveConfig(path);
+  SaveChangedOptions(path);
   REXLOG_INFO("settings menu: saved to {}", path.string());
 }
 
@@ -788,6 +890,7 @@ void CreateSubmenus() {
   if (g_menus_created.load(std::memory_order_relaxed)) {
     return;
   }
+  VrResolutionLabels();  // the card's memory is known once the GPU has started
   uint32_t settings = g_settings_state.load(std::memory_order_relaxed);
   if (!settings) {
     return;

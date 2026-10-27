@@ -304,6 +304,14 @@ void TickAbTest() {
 // error; 2x drove 95.6 FPS uncapped against 105 at 1.5x with SteamVR running; vr_dlss_output_scale=1.5 for more
 // headroom, 1 for DLAA at the render size). A native 2560x2880 render (draw scale 2x4) runs 44 FPS.
 // VR: --vr=true, or MCLA_VR=1.
+// The VR settings page's choices (settings_menu.cpp), read at start: the per-eye render size as a draw resolution
+// scale on 1280x720, and the DLSS mode as its upscale. A --draw_resolution_scale_x/y, --vr_dlss or
+// --vr_dlss_output_scale on the command line wins over them.
+REXCVAR_DEFINE_STRING(vr_resolution, "1x2", "VR",
+                      "VR render size an eye: 1x2 (1280x1440), 2x4 (2560x2880) or 3x6 (3840x4320)");
+REXCVAR_DEFINE_STRING(vr_dlss_mode, "balanced", "VR",
+                      "VR DLSS: off, dlaa (1x), quality (1.5x), balanced (1.72x), performance (2x) or ultra (3x)");
+
 bool VrRequested() {
   const char* v = std::getenv("MCLA_VR");
   return (v && v[0] == '1') || rex::cvar::Query<bool>("vr");
@@ -316,17 +324,42 @@ void MclaConfigureGpuDefaults() {
       {"clear_memory_page_state", "false"},
   };
   if (VrRequested()) {
-    defaults.insert(defaults.end(), {{"draw_resolution_scale_y", "2"},
-                                     {"mcla_motion_blur", "false"},
-                                     {"mcla_depth_of_field", "false"},
-                                     {"vr_dlss", "true"},
-                                     {"vr_dlss_output_scale", "1.85"}});
-    REXLOG_INFO("VR: 2x vertical resolution, no motion blur or depth of field, DLSS to 1.85x (unless set)");
+    defaults.insert(defaults.end(), {{"mcla_motion_blur", "false"}, {"mcla_depth_of_field", "false"}});
   }
   for (const auto& [name, value] : defaults) {
     if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName(name, value);
     }
+  }
+  if (VrRequested()) {
+    // The VR page's resolution and DLSS mode, over anything but the command line (an older mcla.toml may hold a
+    // draw scale or DLSS setting written by the old save).
+    const auto from_command_line = [](const char* name) {
+      return rex::cvar::GetFlagSource(name) == rex::cvar::Source::kCommandLine;
+    };
+    const std::string resolution = REXCVAR_GET(vr_resolution);
+    const char* scale_x = resolution == "2x4" ? "2" : resolution == "3x6" ? "3" : "1";
+    const char* scale_y = resolution == "2x4" ? "4" : resolution == "3x6" ? "6" : "2";
+    if (!from_command_line("draw_resolution_scale_x") && !from_command_line("draw_resolution_scale_y")) {
+      rex::cvar::SetFlagByName("draw_resolution_scale_x", scale_x);
+      rex::cvar::SetFlagByName("draw_resolution_scale_y", scale_y);
+    }
+    const std::string mode = REXCVAR_GET(vr_dlss_mode);
+    const char* upscale = mode == "dlaa"          ? "1"
+                          : mode == "quality"     ? "1.5"
+                          : mode == "performance" ? "2"
+                          : mode == "ultra"       ? "3"
+                                                  : "1.72";
+    if (!from_command_line("vr_dlss")) {
+      rex::cvar::SetFlagByName("vr_dlss", mode == "off" ? "false" : "true");
+    }
+    if (!from_command_line("vr_dlss_output_scale")) {
+      rex::cvar::SetFlagByName("vr_dlss_output_scale", upscale);
+    }
+    REXLOG_INFO("VR: render {}x{} an eye (vr_resolution {}), DLSS {} (x{}), no motion blur or depth of field",
+                1280 * std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()),
+                720 * std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_y").c_str()), resolution,
+                rex::cvar::GetFlagByName("vr_dlss"), rex::cvar::GetFlagByName("vr_dlss_output_scale"));
   }
   if (VrRequested() && REXCVAR_GET(mcla_fps) != 0) {
     // VR paces the game at the headset's refresh rate itself; the game's limiter (30 by default) would hold it below.
