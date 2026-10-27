@@ -50,6 +50,7 @@ double VideoMemoryNeededGB(uint32_t scale_area);
 namespace dlss {
 bool Ready();  // rexglue vr_dlss
 }  // namespace dlss
+double RefreshHz();  // rexglue vr_openxr
 }  // namespace rex::ui::vulkan::vr
 
 void VrApplyHeadsetSize();  // perf_options.cpp
@@ -526,11 +527,36 @@ constexpr int kVrHeadsetMax = 7;
 const char* kVrHeadsetValues[kVrHeadsetMax] = {"noaa", "msaa", "dlaa", "1.25", "1.5", "1.75", "2"};
 const char* kVrHeadsetLabels[kVrHeadsetMax] = {"NO AA", "MSAA (RESTART)", "DLAA"};
 
+// The frame cap: frames to OpenXR at 1/N of the headset's refresh (for an external frame generator), live; labels with
+// the rate they make (VrFrameCapLabels, when the menu is made).
+constexpr const char* kVrFrameCapValues[] = {"1", "2", "3"};
+const char* kVrFrameCapLabels[] = {"OFF", "1/2", "1/3"};
+
+void VrFrameCapLabels() {
+  static std::string labels[3];
+  const double hz = rex::ui::vulkan::vr::RefreshHz();
+  labels[0] = "OFF";
+  for (int n = 2; n <= 3; ++n) {
+    char text[32];
+    if (hz > 0.0) {
+      std::snprintf(text, sizeof text, "1/%d (%.0f FPS)", n, hz / n);
+    } else {
+      std::snprintf(text, sizeof text, "1/%d", n);
+    }
+    labels[n - 1] = text;
+  }
+  for (int i = 0; i < 3; ++i) {
+    kVrFrameCapLabels[i] = labels[i].c_str();
+  }
+}
+
 ItemDef kVrItems[] = {
     {"PM_MxVrRes", ItemKind::kStringChoice, "vr_resolution", "RENDER SIZE (RESTART)", kVrResolutionValues,
      kVrResolutionLabels, nullptr, kVrResolutionCount},
     {"PM_MxVrHeadset", ItemKind::kStringChoice, "vr_headset_size", "HEADSET SIZE",
      kVrHeadsetValues, kVrHeadsetLabels, nullptr, kVrHeadsetMax},
+    {"PM_MxVrFrameCap", ItemKind::kStringChoice, "vr_frame_cap", "FRAME RATE CAP", kVrFrameCapValues,
+     kVrFrameCapLabels, nullptr, 3},
 };
 
 void VrHeadsetLabels() {
@@ -936,6 +962,7 @@ void CreateSubmenus() {
   }
   VrResolutionLabels();  // the card's memory and DLSS are known once the GPU has started
   VrHeadsetLabels();
+  VrFrameCapLabels();
   uint32_t settings = g_settings_state.load(std::memory_order_relaxed);
   if (!settings) {
     return;

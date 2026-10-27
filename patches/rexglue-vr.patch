@@ -954,10 +954,10 @@ index 0000000..91d3fe9
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/include/rex/ui/vulkan/vr_openxr.h b/include/rex/ui/vulkan/vr_openxr.h
 new file mode 100644
-index 0000000..516ed44
+index 0000000..57cd258
 --- /dev/null
 +++ b/include/rex/ui/vulkan/vr_openxr.h
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,132 @@
 +// VR fork: OpenXR for the Vulkan renderer (ported from the Driveclub recomp's and the Uncharted port's VR layer).
 +//
 +// On with MCLA_VR=1 when an OpenXR runtime answers (XR_RUNTIME_JSON picks one, e.g. the OpenXR Simulator). The
@@ -1050,6 +1050,9 @@ index 0000000..516ed44
 +
 +/// The head's current position and yaw become the seat's origin (at the next frame).
 +void Recenter();
++/// The headset's refresh rate in Hz (0 before the session has one), for the settings menu's frame cap labels.
++double RefreshHz();
++
 +/// Whether the headset shows gameplay now: a head-tracked frame with the HUD on its own layer (not the title, menus
 +/// or loading).
 +bool ShowingGameplay();
@@ -7277,10 +7280,10 @@ index 0000000..baf710c
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..bf921e0
+index 0000000..768eaf4
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1735 @@
+@@ -0,0 +1,1798 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -7322,6 +7325,9 @@ index 0000000..bf921e0
 +#endif
 +
 +REXCVAR_DEFINE_BOOL(vr, false, "VR", "Play in a headset through OpenXR (or MCLA_VR=1)");
++REXCVAR_DEFINE_INT32(vr_frame_cap, 1, "VR",
++                     "Live: frames to OpenXR at 1/N of the headset's refresh (1 off, 2 half, 3 a third): the game "
++                     "paced to it and the headset loop submitting at it, for an external frame generator");
 +REXCVAR_DEFINE_BOOL(vr_desktop_mirror, false, "VR",
 +                    "Show the game in its desktop window too while in VR (may stall the game now and then)");
 +
@@ -7513,6 +7519,10 @@ index 0000000..bf921e0
 +  std::atomic<uint64_t> display_period_ns{0};
 +  std::atomic<uint64_t> refresh_period_ns{0};
 +  std::atomic<bool> capped{false};
++  // Slow frames (the game under 80% of the headset's rate, back at 95%, or the frame cap on): rendered this much wider
++  // than the eyes' field of view, so the runtime has picture to turn into before the next frame (else a head turn
++  // shows the frame's edge: the map transition "cropped on one side"). MCLA_VR_OVERSCAN sets the factor (1: none).
++  std::atomic<bool> slow_frames{false};
 +  std::atomic<bool> flip_token{false};
 +  std::mutex token_mutex;
 +  std::condition_variable token_cv;
@@ -8066,10 +8076,16 @@ index 0000000..bf921e0
 +                          2 * (xy - wz),     1 - 2 * (xx + zz), 2 * (yz + wx),     0,
 +                          2 * (xz + wy),     2 * (yz - wx),     1 - 2 * (xx + yy), 0,
 +                          p.x,               p.y,               p.z,               1};
-+  const float tangents[4] = {std::tan(std::min(views[0].fov.angleLeft, views[1].fov.angleLeft)),
-+                             std::tan(std::max(views[0].fov.angleRight, views[1].fov.angleRight)),
-+                             std::tan(std::max(views[0].fov.angleUp, views[1].fov.angleUp)),
-+                             std::tan(std::min(views[0].fov.angleDown, views[1].fov.angleDown))};
++  static const float overscan_factor = [] {
++    const char* v = std::getenv("MCLA_VR_OVERSCAN");
++    return v ? std::max(1.f, float(std::atof(v))) : 1.15f;
++  }();
++  const float overscan =
++      g.slow_frames.load(std::memory_order_relaxed) || REXCVAR_GET(vr_frame_cap) > 1 ? overscan_factor : 1.f;
++  const float tangents[4] = {overscan * std::tan(std::min(views[0].fov.angleLeft, views[1].fov.angleLeft)),
++                             overscan * std::tan(std::max(views[0].fov.angleRight, views[1].fov.angleRight)),
++                             overscan * std::tan(std::max(views[0].fov.angleUp, views[1].fov.angleUp)),
++                             overscan * std::tan(std::min(views[0].fov.angleDown, views[1].fov.angleDown))};
 +  const float ex = views[1].pose.position.x - views[0].pose.position.x,
 +              ey = views[1].pose.position.y - views[0].pose.position.y,
 +              ez = views[1].pose.position.z - views[0].pose.position.z;
@@ -8393,6 +8409,32 @@ index 0000000..bf921e0
 +  g.vk.vkWaitSemaphores(g.device, &info, uint64_t(left.count()));
 +}
 +
++// Sleeps for `duration` with a high-resolution waitable timer and a short spin (a plain sleep rounds up to 15.6 ms
++// when Windows ignores the process's timer resolution).
++void SleepPrecise(std::chrono::nanoseconds duration) {
++  const auto until = std::chrono::steady_clock::now() + duration;
++  constexpr auto kSpin = std::chrono::microseconds(500);
++  if (duration > kSpin + std::chrono::microseconds(200)) {
++#ifdef _WIN32
++    thread_local HANDLE timer =
++        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++    if (timer) {
++      LARGE_INTEGER due;
++      due.QuadPart = -int64_t((duration - kSpin).count() / 100);
++      if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
++        WaitForSingleObject(timer, INFINITE);
++      }
++    } else {
++      std::this_thread::sleep_for(duration - kSpin);
++    }
++#else
++    std::this_thread::sleep_for(duration - kSpin);
++#endif
++  }
++  while (std::chrono::steady_clock::now() < until) {
++  }
++}
++
 +void FrameLoop() {
 +  while (!g.quit) {
 +    PollEvents();
@@ -8451,6 +8493,13 @@ index 0000000..bf921e0
 +    g.repeats += !shown;
 +    EndFrame();
 +    NoteFrameTime();
++    // The frame cap (vr_frame_cap N): the next frame N refresh periods on, the N - 1 between left to the runtime (an
++    // external frame generator fills them). xrWaitFrame then gives the display time of the frame after the wait.
++    const int cap = std::clamp(REXCVAR_GET(vr_frame_cap), 1, 4);
++    const uint64_t period = g.display_period_ns.load(std::memory_order_relaxed);
++    if (cap > 1 && period) {
++      SleepPrecise(std::chrono::nanoseconds(uint64_t(cap - 1) * period - std::min<uint64_t>(period / 4, 2000000)));
++    }
 +  }
 +}
 +
@@ -8473,6 +8522,16 @@ index 0000000..bf921e0
 +    return;
 +  }
 +  const double rate = g.flips / seconds, hz = 1e9 / double(period);
++  {  // slow frames: overscan (State::slow_frames)
++    const bool slow = g.slow_frames.load(std::memory_order_relaxed);
++    if (!slow && rate < 0.8 * hz) {
++      g.slow_frames = true;
++      Log("slow frames (%.0f FPS at %.0f Hz): rendering wider for head turns", rate, hz);
++    } else if (slow && rate > 0.95 * hz) {
++      g.slow_frames = false;
++      Log("frames back at the headset's rate (%.0f FPS)", rate);
++    }
++  }
 +  // Capped always: a frame later than its slot just doesn't wait (PaceSwap), so a game slower than the headset loses
 +  // nothing, and a faster one makes one frame a headset frame.
 +  if (!g.capped.exchange(true, std::memory_order_relaxed)) {
@@ -8856,7 +8915,8 @@ index 0000000..bf921e0
 +    return;
 +  }
 +  const uint64_t refresh = g.refresh_period_ns.load(std::memory_order_relaxed);
-+  const uint64_t period_ns = refresh ? refresh : g.display_period_ns.load(std::memory_order_relaxed);
++  const uint64_t period_ns = (refresh ? refresh : g.display_period_ns.load(std::memory_order_relaxed)) *
++                             uint64_t(std::clamp(REXCVAR_GET(vr_frame_cap), 1, 4));  // the frame cap: 1/N
 +  if (!period_ns) {
 +    return;
 +  }
@@ -8895,6 +8955,12 @@ index 0000000..bf921e0
 +}
 +
 +void Recenter() { g.recenter_requested = true; }
++
++double RefreshHz() {
++  const uint64_t refresh = g.refresh_period_ns.load(std::memory_order_relaxed);
++  const uint64_t period = refresh ? refresh : g.display_period_ns.load(std::memory_order_relaxed);
++  return period ? 1e9 / double(period) : 0.0;
++}
 +
 +bool ShowingGameplay() { return g.shown_posed && g.shown_hud; }  // the title is head-tracked too, without the HUD layer
 +
