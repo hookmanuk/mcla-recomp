@@ -1058,10 +1058,10 @@ index 0000000..151aed8
 +}  // namespace rex::ui::vulkan::vr
 diff --git a/include/rex/ui/vulkan/vr_twins.h b/include/rex/ui/vulkan/vr_twins.h
 new file mode 100644
-index 0000000..42ee636
+index 0000000..9eb2ec9
 --- /dev/null
 +++ b/include/rex/ui/vulkan/vr_twins.h
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,131 @@
 +// VR fork: stereo by replaying each submission for the right eye.
 +//
 +// The renderer records every GPU command into its deferred command buffer; with stereo on, the submission replays it
@@ -1143,6 +1143,8 @@ index 0000000..42ee636
 +/// The GPU's device-local memory in GB (0 before the device starts), and the estimate of what stereo at a draw
 +/// resolution scale area needs (the guard's): for the settings menu.
 +double VideoMemoryTotalGB();
++/// The device-local memory free now (budget less usage, VK_EXT_memory_budget; the total when it is missing).
++double VideoMemoryFreeGB(const VulkanDevice* device);
 +double VideoMemoryNeededGB(uint32_t scale_area);
 +
 +/// Development: device memory allocated for right-eye twins so far.
@@ -2061,7 +2063,7 @@ index 47926fb..4997ce1 100644
        page_heat_decay_ms_ = now_ms;
        for (uint8_t& heat : page_heat_) {
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 53dcb7f..0cf69ca 100644
+index 53dcb7f..854698a 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -12,6 +12,12 @@
@@ -3479,25 +3481,27 @@ index 53dcb7f..0cf69ca 100644
    }
  
    if (is_closing_frame) {
-@@ -5489,6 +6606,17 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5489,6 +6606,19 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      // Submission already closed now, so minus 1.
      closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] = GetCurrentSubmission() - 1;
  
 +    // VR fork: render targets owning no EDRAM and idle for 600 frames are freed (each spans all of EDRAM at the
-+    // scale, twice in stereo: 30 of them took 6.6 GB at 2x4). One wait for the GPU when there are any.
-+    // MCLA_VR_PRUNE_RT=0 keeps them.
-+    static const bool vr_prune = [] {
++    // scale, twice in stereo: 30 of them took 6.6 GB at 2x4) when video memory runs low (under 3 GB free): the
++    // freeing waits for the GPU (a ~50 ms hitch), not worth it on a card with room. MCLA_VR_PRUNE_RT=0 never,
++    // =2 whenever any are idle.
++    static const int vr_prune = [] {
 +      const char* v = std::getenv("MCLA_VR_PRUNE_RT");
-+      return !(v && v[0] == '0');
++      return v ? std::atoi(v) : 1;
 +    }();
 +    if (vr_prune && !cache_clear_requested_ && frame_current_ % 300 == 0 &&
++        (vr_prune == 2 || ui::vulkan::vr::VideoMemoryFreeGB(GetVulkanDevice()) < 3.0) &&
 +        render_target_cache_->VrCountIdleRenderTargets(600) && AwaitAllQueueOperationsCompletion()) {
 +      render_target_cache_->VrPruneIdleRenderTargets(600);
 +    }
      if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
        cache_clear_requested_ = false;
  
-@@ -5532,6 +6660,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+@@ -5532,6 +6662,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
  
    constants_transient_descriptors_free_.clear();
    constants_transient_descriptors_used_.clear();
@@ -3506,7 +3510,7 @@ index 53dcb7f..0cf69ca 100644
    for (std::vector<VkDescriptorSet>& transient_descriptors_free :
         single_transient_descriptors_free_) {
      transient_descriptors_free.clear();
-@@ -6480,6 +7610,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6480,6 +7612,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferCount) - 1;
    assert_zero(current_constant_buffers_up_to_date_ & ~kAllConstantBuffersMask);
    if ((current_constant_buffers_up_to_date_ & kAllConstantBuffersMask) != kAllConstantBuffersMask) {
@@ -3514,7 +3518,7 @@ index 53dcb7f..0cf69ca 100644
      current_graphics_descriptor_set_values_up_to_date_ &=
          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
      size_t uniform_buffer_alignment =
-@@ -6512,23 +7643,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6512,23 +7645,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        // dummy buffer.
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_vertex, UINT32_C(1));
@@ -3552,7 +3556,7 @@ index 53dcb7f..0cf69ca 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6541,23 +7675,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6541,23 +7677,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
            current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFloatPixel];
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_pixel, UINT32_C(1));
@@ -3590,7 +3594,7 @@ index 53dcb7f..0cf69ca 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6597,6 +7734,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6597,6 +7736,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                                << SpirvShaderTranslator::kConstantBufferFetch;
      }
@@ -3600,7 +3604,7 @@ index 53dcb7f..0cf69ca 100644
    }
  
    // Textures and samplers.
-@@ -6640,6 +7780,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6640,6 +7782,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (texture_count_pixel || sampler_count_pixel) &&
        !(current_graphics_descriptor_set_values_up_to_date_ &
          (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
@@ -3613,7 +3617,7 @@ index 53dcb7f..0cf69ca 100644
    descriptor_write_image_info_.clear();
    descriptor_write_image_info_.reserve(
        (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-@@ -6656,6 +7802,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6656,6 +7804,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -3625,7 +3629,7 @@ index 53dcb7f..0cf69ca 100644
    size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_vertex_textures && sampler_count_vertex) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6676,6 +7827,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6676,6 +7829,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -3649,7 +3653,7 @@ index 53dcb7f..0cf69ca 100644
    size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_pixel_textures && sampler_count_pixel) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6707,8 +7875,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6707,8 +7877,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        VkDescriptorPoolSize constants_descriptor_count;
        constants_descriptor_count.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
        constants_descriptor_count.descriptorCount = SpirvShaderTranslator::kConstantBufferCount;
@@ -3664,7 +3668,7 @@ index 53dcb7f..0cf69ca 100644
        if (constants_descriptor_set == VK_NULL_HANDLE) {
          return false;
        }
-@@ -6724,7 +7896,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6724,7 +7898,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        write_constants.dstBinding = i;
        write_constants.dstArrayElement = 0;
        write_constants.descriptorCount = 1;
@@ -3674,7 +3678,7 @@ index 53dcb7f..0cf69ca 100644
        write_constants.pImageInfo = nullptr;
        write_constants.pBufferInfo = &current_constant_buffer_infos_[i];
        write_constants.pTexelBufferView = nullptr;
-@@ -6732,6 +7905,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6732,6 +7907,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
          constants_descriptor_set;
@@ -3687,7 +3691,7 @@ index 53dcb7f..0cf69ca 100644
    }
    // Vertex shader textures and samplers.
    if (write_vertex_textures) {
-@@ -6751,13 +7930,25 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6751,13 +7932,25 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
          write_textures[0].dstSet;
    }
    // Pixel shader textures and samplers.
@@ -3715,7 +3719,7 @@ index 53dcb7f..0cf69ca 100644
          descriptor_write_image_info_.data() + pixel_sampler_image_info_offset, write_textures);
      if (!texture_descriptor_set_write_count) {
        return false;
-@@ -6781,7 +7972,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6781,7 +7974,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    if (!texture_count_vertex && !sampler_count_vertex) {
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
    }
@@ -3725,7 +3729,7 @@ index 53dcb7f..0cf69ca 100644
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
    }
    uint32_t descriptor_sets_remaining =
-@@ -6790,21 +7982,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6790,21 +7984,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    while (rex::bit_scan_forward(descriptor_sets_remaining, &descriptor_set_index)) {
      uint32_t descriptor_set_mask_tzcnt =
          rex::tzcnt(~(descriptor_sets_remaining | ((UINT32_C(1) << descriptor_set_index) - 1)));
@@ -3781,7 +3785,7 @@ index 53dcb7f..0cf69ca 100644
  uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
      bool is_vertex, uint32_t texture_count, uint32_t sampler_count,
      VkDescriptorSetLayout descriptor_set_layout, const VkDescriptorImageInfo* texture_image_info,
-@@ -6814,6 +8039,8 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6814,6 +8041,8 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
    if (!texture_count && !sampler_count) {
      return 0;
    }
@@ -3790,7 +3794,7 @@ index 53dcb7f..0cf69ca 100644
    TextureDescriptorSetLayoutKey texture_descriptor_set_layout_key;
    texture_descriptor_set_layout_key.texture_count = texture_count;
    texture_descriptor_set_layout_key.sampler_count = sampler_count;
-@@ -6832,7 +8059,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6832,7 +8061,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
        VkDescriptorPoolSize& texture_descriptor_count =
            texture_descriptor_counts[texture_descriptor_counts_count++];
        texture_descriptor_count.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -3799,7 +3803,7 @@ index 53dcb7f..0cf69ca 100644
      }
      if (sampler_count) {
        VkDescriptorPoolSize& texture_descriptor_count =
-@@ -6861,7 +8088,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6861,7 +8090,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
      descriptor_set_write.dstSet = texture_descriptor_set;
      descriptor_set_write.dstBinding = 0;
      descriptor_set_write.dstArrayElement = 0;
@@ -8786,10 +8790,10 @@ index 0000000..d3f79d5
 +}  // namespace rex::ui::vulkan::vr
 diff --git a/src/ui/vulkan/vr_twins.cpp b/src/ui/vulkan/vr_twins.cpp
 new file mode 100644
-index 0000000..91831cd
+index 0000000..8c441c1
 --- /dev/null
 +++ b/src/ui/vulkan/vr_twins.cpp
-@@ -0,0 +1,1901 @@
+@@ -0,0 +1,1921 @@
 +// VR fork: the right eye's twin resources and its replay function table (see vr_twins.h).
 +
 +#include <rex/ui/vulkan/vr_twins.h>
@@ -10440,6 +10444,26 @@ index 0000000..91831cd
 +std::atomic<double> video_memory_total_gb{0.0};
 +
 +double VideoMemoryTotalGB() { return video_memory_total_gb.load(); }
++
++double VideoMemoryFreeGB(const VulkanDevice* device) {
++  const VulkanInstance::Functions& ifn = device->vulkan_instance()->functions();
++  if (!ifn.vkGetPhysicalDeviceMemoryProperties2 || !device->extensions().ext_EXT_memory_budget) {
++    return video_memory_total_gb.load();
++  }
++  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
++  VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
++  properties.pNext = &budget;
++  ifn.vkGetPhysicalDeviceMemoryProperties2(device->physical_device(), &properties);
++  uint64_t free_bytes = 0;
++  for (uint32_t i = 0; i < properties.memoryProperties.memoryHeapCount; ++i) {
++    if (properties.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
++      free_bytes = std::max(free_bytes, budget.heapBudget[i] > budget.heapUsage[i]
++                                            ? uint64_t(budget.heapBudget[i] - budget.heapUsage[i])
++                                            : uint64_t(0));
++    }
++  }
++  return double(free_bytes) / double(1ull << 30);
++}
 +
 +double VideoMemoryNeededGB(uint32_t scale_area) {
 +  double gb_per_area = 1.05;
