@@ -308,18 +308,26 @@ void TickAbTest() {
 // The VR settings page's choices (settings_menu.cpp), read at start: the per-eye render size as a draw resolution
 // scale on 1280x720, and the DLSS mode as its upscale. A --draw_resolution_scale_x/y, --vr_dlss or
 // --vr_dlss_output_scale on the command line wins over them.
-REXCVAR_DEFINE_STRING(vr_resolution, "1x2", "VR",
+// Default 2560x2880 with no anti-aliasing (Matt 2026-10-27: "thats the best setting and should be the default"; it
+// held 72 FPS where DLAA ran 67 and MSAA 57). A card without the memory gets a smaller size at start (vr_twins.cpp).
+REXCVAR_DEFINE_STRING(vr_resolution, "2x4", "VR",
                       "VR render size an eye: 1x2 (1280x1440), 2x4 (2560x2880) or 3x6 (3840x4320)");
-REXCVAR_DEFINE_STRING(vr_headset_size, "2240x2520", "VR",
-                      "VR size an eye sent to the headset: render (the render size, the game's MSAA), dlaa (the render "
-                      "size, DLSS anti-aliasing) or WxH, DLSS upscaling the render size to it (at most 3x; at or below "
-                      "the render size: DLAA). Without an NVIDIA RTX GPU DLSS cannot run: the render size with MSAA");
+REXCVAR_DEFINE_STRING(vr_headset_size, "noaa", "VR",
+                      "VR size an eye sent to the headset: noaa (the render size, no anti-aliasing), msaa (the render "
+                      "size, the game's MSAA; next start), dlaa (the render size, DLSS anti-aliasing) or WxH, DLSS "
+                      "upscaling the render size to it (at most 3x; at or below the render size: DLAA). DLSS needs an "
+                      "NVIDIA RTX GPU");
+
+// The headset sizes the render size goes out at unchanged, DLSS loaded but not used (vr_dlss_bypass, live).
+bool VrHeadsetBypassesDlss(const std::string& headset) {
+  return headset == "noaa" || headset == "msaa" || headset == "render";  // "render": the earlier name of msaa
+}
 
 double VrHeadsetUpscale() {
   // DLSS's upscale: the headset width over the render width (the same over the heights: both are 8:9); 1 (DLAA) for
   // the render size or at or below it; at most 3.
   const std::string headset = REXCVAR_GET(vr_headset_size);
-  if (headset == "render" || headset == "dlaa") {
+  if (VrHeadsetBypassesDlss(headset) || headset == "dlaa") {
     return 1.0;
   }
   const double render_width =
@@ -331,6 +339,7 @@ double VrHeadsetUpscale() {
 // while running (the eyes' images, the headset screens and the DLSS features follow the new size; MSAA, chosen with
 // "render", is the game's and takes the next start).
 void VrApplyHeadsetSize() {
+  rex::cvar::SetFlagByName("vr_dlss_bypass", VrHeadsetBypassesDlss(REXCVAR_GET(vr_headset_size)) ? "true" : "false");
   if (rex::cvar::GetFlagSource("vr_dlss_output_scale") == rex::cvar::Source::kCommandLine) {
     return;
   }
@@ -373,7 +382,7 @@ void MclaConfigureGpuDefaults() {
     const uint32_t render_width = 1280 * uint32_t(std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str()));
     const uint32_t render_height = 720 * uint32_t(std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_y").c_str()));
     if (!from_command_line("vr_dlss")) {
-      rex::cvar::SetFlagByName("vr_dlss", headset != "render" ? "true" : "false");
+      rex::cvar::SetFlagByName("vr_dlss", "true");  // loaded in VR; bypassed for NO AA / MSAA (live switching)
     }
     VrApplyHeadsetSize();
     REXLOG_INFO("VR: render {}x{} an eye (vr_resolution {}), headset {} (DLSS {}, x{}; the render size with MSAA "
@@ -437,8 +446,19 @@ bool Ready();  // rexglue vr_dlss
 
 // MSAA off: asked for, or in VR when DLSS anti-aliases instead (it runs and MSAA is not asked for).
 bool MsaaOff() {
-  static const bool vr_default = VrRequested() && rex::cvar::GetFlagSource("mcla_msaa") == rex::cvar::Source::kDefault;
-  return !REXCVAR_GET(mcla_msaa) || (vr_default && rex::ui::vulkan::vr::dlss::Ready());
+  // VR: the headset size decides (unless the command line set mcla_msaa): MSAA only for "msaa" (and, where DLSS
+  // cannot run, for the DLSS sizes: their fallback); none for NO AA; off where DLSS anti-aliases.
+  if (VrRequested() && rex::cvar::GetFlagSource("mcla_msaa") != rex::cvar::Source::kCommandLine) {
+    const std::string headset = REXCVAR_GET(vr_headset_size);
+    if (headset == "msaa" || headset == "render") {
+      return false;
+    }
+    if (headset == "noaa") {
+      return true;
+    }
+    return rex::ui::vulkan::vr::dlss::Ready();
+  }
+  return !REXCVAR_GET(mcla_msaa);
 }
 
 bool mcla_msaa(PPCRegister& r11) {

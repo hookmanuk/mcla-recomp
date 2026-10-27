@@ -6278,10 +6278,10 @@ index 0000000..924e791
 +	0x00000046,0x0000003f,0x00040063,0x00000037,0x00000038,0x00000046,0x000100fd,0x00010038
 diff --git a/src/ui/vulkan/vr_dlss.cpp b/src/ui/vulkan/vr_dlss.cpp
 new file mode 100644
-index 0000000..60e9d82
+index 0000000..baf710c
 --- /dev/null
 +++ b/src/ui/vulkan/vr_dlss.cpp
-@@ -0,0 +1,855 @@
+@@ -0,0 +1,878 @@
 +// VR fork: DLSS for the headset's eyes (vr_dlss.h).
 +#include <rex/ui/vulkan/vr_dlss.h>
 +
@@ -6311,6 +6311,9 @@ index 0000000..60e9d82
 +#endif
 +
 +REXCVAR_DEFINE_BOOL(vr_dlss, false, "VR", "DLSS in VR (needs bbport_dlss.dll and nvngx_dlss.dll beside the program)");
++REXCVAR_DEFINE_BOOL(vr_dlss_bypass, false, "VR",
++                    "Live: DLSS loaded but not used: no jitter, the render size to the headset (the VR settings' NO AA "
++                    "and MSAA headset sizes, switchable to DLSS while playing)");
 +REXCVAR_DEFINE_DOUBLE(vr_dlss_output_scale, 1.0, "VR",
 +                      "DLSS's output to the headset at this scale of the render size (1: DLAA; 1.5: an upscale)");
 +
@@ -6562,7 +6565,8 @@ index 0000000..60e9d82
 +}  // namespace
 +
 +void OutputSize(uint32_t width, uint32_t height, uint32_t& output_width, uint32_t& output_height) {
-+  const double scale = g.ready ? std::clamp(REXCVAR_GET(vr_dlss_output_scale), 1.0, 3.0) : 1.0;
++  const double scale =
++      g.ready && !REXCVAR_GET(vr_dlss_bypass) ? std::clamp(REXCVAR_GET(vr_dlss_output_scale), 1.0, 3.0) : 1.0;
 +  output_width = std::max(width, uint32_t(double(width) * scale + 0.5) & ~1u);
 +  output_height = std::max(height, uint32_t(double(height) * scale + 0.5) & ~1u);
 +}
@@ -6775,8 +6779,12 @@ index 0000000..60e9d82
 +      }
 +      if (uint32_t(std::atoi(test.c_str() + at)) == test_frame) {
 +        const std::string scale = test.substr(colon + 1, comma == std::string::npos ? std::string::npos : comma - colon - 1);
-+        rex::cvar::SetFlagByName("vr_dlss_output_scale", scale);
-+        REXLOG_INFO("VR DLSS test: frame {}, output scale {}", test_frame, scale);
++        if (scale == "off" || scale == "on") {  // the bypass (the settings' NO AA / MSAA)
++          rex::cvar::SetFlagByName("vr_dlss_bypass", scale == "off" ? "true" : "false");
++        } else {
++          rex::cvar::SetFlagByName("vr_dlss_output_scale", scale);
++        }
++        REXLOG_INFO("VR DLSS test: frame {}, {}", test_frame, scale);
 +      }
 +      at = comma == std::string::npos ? test.size() : comma + 1;
 +    }
@@ -6799,6 +6807,20 @@ index 0000000..60e9d82
 +  jitter.pixels_y = Halton(jitter.index, 3) - 0.5f;
 +  jitter.ndc_x = 2.f * jitter.pixels_x / float(width);
 +  jitter.ndc_y = 2.f * jitter.pixels_y / float(height);
++  // VR fork: bypassed (the settings' NO AA / MSAA): no jitter; DLSS's history starts again when it is used again.
++  static bool was_bypassed = false;
++  const bool bypassed = REXCVAR_GET(vr_dlss_bypass);
++  if (bypassed) {
++    jitter.pixels_x = jitter.pixels_y = jitter.ndc_x = jitter.ndc_y = 0.f;
++  }
++  if (bypassed != was_bypassed) {
++    for (Eye& eye : eyes) {
++      eye.reset = true;
++      eye.have_previous = false;
++    }
++    REXLOG_INFO("VR DLSS: {}", bypassed ? "bypassed (the render size, no DLSS)" : "in use again");
++    was_bypassed = bypassed;
++  }
 +}
 +
 +void FrameJitter(float& x, float& y) {
@@ -6987,7 +7009,8 @@ index 0000000..60e9d82
 +                 bool fill_row) {
 +  const int index = ReplayEye();
 +  Eye& eye = eyes[index];
-+  if (!g.ready || !eye.depth_ready || eye.depth.width != width || eye.depth.height != height) {
++  if (!g.ready || REXCVAR_GET(vr_dlss_bypass) || !eye.depth_ready || eye.depth.width != width ||
++      eye.depth.height != height) {
 +    eye.depth_ready = false;
 +    return false;
 +  }

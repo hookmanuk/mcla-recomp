@@ -518,23 +518,23 @@ void VrResolutionLabels() {
 // The size an eye sent to the headset: the render size (MSAA, or DLSS's anti-aliasing) or a bigger size DLSS upscales
 // the render size to (needs an NVIDIA RTX GPU; without it the game sends the render size with its MSAA, and the menu
 // shows that). Short values: the size and its DLSS factor from the render size the game started with.
-constexpr const char* kVrHeadsetValues[] = {"render", "dlaa", "1920x2160", "2240x2520", "2560x2880", "3200x3600",
-                                            "3840x4320"};
-const char* kVrHeadsetLabels[] = {"RENDER (MSAA)", "RENDER (DLAA)", "1920X2160", "2240X2520",
-                                  "2560X2880",     "3200X3600",     "3840X4320"};
+constexpr const char* kVrHeadsetValues[] = {"noaa",      "msaa",      "dlaa",      "1920x2160",
+                                            "2240x2520", "2560x2880", "3200x3600", "3840x4320"};
+const char* kVrHeadsetLabels[] = {"RENDER (NO AA)", "RENDER (MSAA)", "RENDER (DLAA)", "1920X2160",
+                                  "2240X2520",      "2560X2880",     "3200X3600",     "3840X4320"};
 
 void VrHeadsetLabels() {
-  static std::string labels[7];
-  static const char* const kNames[] = {"RENDER (MSAA)", "RENDER (DLAA)", "1920X2160", "2240X2520",
-                                       "2560X2880",     "3200X3600",     "3840X4320"};
-  static const uint32_t kWidths[] = {0, 0, 1920, 2240, 2560, 3200, 3840};
+  static std::string labels[8];
+  static const char* const kNames[] = {"RENDER (NO AA)", "RENDER (MSAA)", "RENDER (DLAA)", "1920X2160",
+                                       "2240X2520",      "2560X2880",     "3200X3600",     "3840X4320"};
+  static const uint32_t kWidths[] = {0, 0, 0, 1920, 2240, 2560, 3200, 3840};
   const bool ready = rex::ui::vulkan::vr::dlss::Ready();
   const uint32_t render_width =
       1280 * uint32_t(std::max(1, std::atoi(rex::cvar::GetFlagByName("draw_resolution_scale_x").c_str())));
-  for (int i = 0; i < 7; ++i) {
+  for (int i = 0; i < 8; ++i) {
     labels[i] = kNames[i];
     char text[24] = "";
-    if (i && !ready) {
+    if (i >= 2 && !ready) {
       std::snprintf(text, sizeof text, " NO RTX");
     } else if (kWidths[i]) {
       const double upscale = double(kWidths[i]) / double(render_width);
@@ -547,17 +547,13 @@ void VrHeadsetLabels() {
     labels[i] += text;
     kVrHeadsetLabels[i] = labels[i].c_str();
   }
-  // What runs: without DLSS any choice is the render size with MSAA. Shown, not saved (only menu changes are).
-  if (!ready && rex::cvar::GetFlagSource("vr_headset_size") == rex::cvar::Source::kDefault) {
-    rex::cvar::SetFlagByName("vr_headset_size", "render");
-  }
 }
 
 const ItemDef kVrItems[] = {
     {"PM_MxVrRes", ItemKind::kStringChoice, "vr_resolution", "RENDER SIZE (RESTART)",
      kVrResolutionValues, kVrResolutionLabels, nullptr, 3},
     {"PM_MxVrHeadset", ItemKind::kStringChoice, "vr_headset_size", "HEADSET SIZE (MSAA NEEDS RESTART)",
-     kVrHeadsetValues, kVrHeadsetLabels, nullptr, 7},
+     kVrHeadsetValues, kVrHeadsetLabels, nullptr, 8},
 };
 
 const ItemDef kControlItems[] = {
