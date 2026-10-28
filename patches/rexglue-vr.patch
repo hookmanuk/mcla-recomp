@@ -8181,10 +8181,10 @@ index 0000000..4b721f7
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..a074125
+index 0000000..e555a9e
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1835 @@
+@@ -0,0 +1,1935 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -8198,6 +8198,7 @@ index 0000000..a074125
 +#include <condition_variable>
 +#include <cstdarg>
 +#include <cstdio>
++#include <filesystem>
 +#include <cstdlib>
 +#include <cstring>
 +#include <deque>
@@ -8317,7 +8318,13 @@ index 0000000..a074125
 +  VK_FN(vkCmdBindPipeline)               \
 +  VK_FN(vkCmdBindDescriptorSets)         \
 +  VK_FN(vkCmdPushConstants)              \
-+  VK_FN(vkCmdDispatch)
++  VK_FN(vkCmdDispatch)                   \
++  VK_FN(vkCreateBuffer)                  \
++  VK_FN(vkDestroyBuffer)                 \
++  VK_FN(vkGetBufferMemoryRequirements)   \
++  VK_FN(vkBindBufferMemory)              \
++  VK_FN(vkMapMemory)                     \
++  VK_FN(vkCmdCopyImageToBuffer)
 +  VK_FUNCTIONS
 +#undef VK_FN
 +  PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties{};
@@ -9076,6 +9083,97 @@ index 0000000..a074125
 +  return g.cmds[i];
 +}
 +
++// VR fork, development: MCLA_VR_EYE_SHOT=<path>.bmp: when <path>.bmp.req appears, the next picture sent to the
++// headset (both eyes side by side, at full size) is saved as a 32-bit BMP and the request file removed.
++struct EyeShot {
++  VkBuffer buffer{};
++  VkDeviceMemory memory{};
++  uint32_t width = 0, height = 0;
++};
++
++EyeShot StartEyeShot(VkCommandBuffer cmd, VkImage image, uint32_t width, uint32_t height) {
++  EyeShot shot;
++  static const char* path = std::getenv("MCLA_VR_EYE_SHOT");
++  if (!path || !std::filesystem::exists(std::string(path) + ".req")) {
++    return shot;
++  }
++  VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++  info.size = VkDeviceSize(width) * height * 4;
++  info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++  if (g.vk.vkCreateBuffer(g.device, &info, nullptr, &shot.buffer) != VK_SUCCESS) {
++    return {};
++  }
++  VkMemoryRequirements requirements{};
++  g.vk.vkGetBufferMemoryRequirements(g.device, shot.buffer, &requirements);
++  VkPhysicalDeviceMemoryProperties properties{};
++  g.vk.vkGetPhysicalDeviceMemoryProperties(g.physical_device, &properties);
++  const VkMemoryPropertyFlags wanted = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++  uint32_t type = 0;
++  while (type < properties.memoryTypeCount && !((requirements.memoryTypeBits & (1u << type)) &&
++                                                (properties.memoryTypes[type].propertyFlags & wanted) == wanted)) {
++    ++type;
++  }
++  VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++  alloc.allocationSize = requirements.size;
++  alloc.memoryTypeIndex = type;
++  if (type == properties.memoryTypeCount ||
++      g.vk.vkAllocateMemory(g.device, &alloc, nullptr, &shot.memory) != VK_SUCCESS) {
++    g.vk.vkDestroyBuffer(g.device, shot.buffer, nullptr);
++    return {};
++  }
++  g.vk.vkBindBufferMemory(g.device, shot.buffer, shot.memory, 0);
++  VkBufferImageCopy region{};
++  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++  region.imageExtent = {width, height, 1};
++  g.vk.vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, shot.buffer, 1, &region);
++  shot.width = width;
++  shot.height = height;
++  return shot;
++}
++
++void FinishEyeShot(EyeShot& shot, VkFence fence) {
++  if (!shot.buffer) {
++    return;
++  }
++  static const char* path = std::getenv("MCLA_VR_EYE_SHOT");
++  g.vk.vkWaitForFences(g.device, 1, &fence, VK_TRUE, UINT64_MAX);
++  void* data = nullptr;
++  if (g.vk.vkMapMemory(g.device, shot.memory, 0, VK_WHOLE_SIZE, 0, &data) == VK_SUCCESS) {
++    const bool rgba = UnormTwin(g.format) != VK_FORMAT_B8G8R8A8_UNORM;
++    const uint32_t row = shot.width * 4, size = row * shot.height;
++    uint8_t header[54] = {'B', 'M'};
++    auto put = [&](int at, uint32_t v) { std::memcpy(header + at, &v, 4); };
++    put(2, 54 + size);
++    put(10, 54);
++    put(14, 40);
++    put(18, shot.width);
++    put(22, uint32_t(-int32_t(shot.height)));  // top-down
++    header[26] = 1;
++    header[28] = 32;
++    put(34, size);
++    if (FILE* f = std::fopen(path, "wb")) {
++      std::fwrite(header, 1, sizeof(header), f);
++      std::vector<uint8_t> line(row);
++      for (uint32_t y = 0; y < shot.height; ++y) {
++        std::memcpy(line.data(), static_cast<const uint8_t*>(data) + size_t(y) * row, row);
++        if (rgba) {
++          for (uint32_t x = 0; x < row; x += 4) {
++            std::swap(line[x], line[x + 2]);
++          }
++        }
++        std::fwrite(line.data(), 1, row, f);
++      }
++      std::fclose(f);
++      Log("eye shot %ux%u saved", shot.width, shot.height);
++    }
++  }
++  g.vk.vkFreeMemory(g.device, shot.memory, nullptr);  // (unmapped with it)
++  g.vk.vkDestroyBuffer(g.device, shot.buffer, nullptr);
++  std::error_code ec;
++  std::filesystem::remove(std::string(path) + ".req", ec);
++  shot = {};
++}
++
 +void SubmitCommand(VkCommandBuffer cmd, const State::Published& p) {
 +  g.vk.vkEndCommandBuffer(cmd);
 +  const uint32_t i = (g.next_cmd + 2) % 3;
@@ -9126,6 +9224,7 @@ index 0000000..a074125
 +                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 +  Barrier(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 +          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);
++  EyeShot shot = StartEyeShot(cmd, g.screen_images[p.screen], g.width, g.height);  // VR fork, development
 +  if (p.hud && (g.hud_width == p.width && g.hud_height == p.height ? true : CreateHudSwapchain(p.width, p.height))) {
 +    uint32_t hud_index = 0;
 +    {
@@ -9168,6 +9267,7 @@ index 0000000..a074125
 +    g.shown_hud = false;
 +  }
 +  SubmitCommand(cmd, p);
++  FinishEyeShot(shot, g.fences[(g.next_cmd + 2) % 3]);
 +  g.shown_posed = p.posed;
 +  std::memcpy(g.shown_pose, p.pose, sizeof(g.shown_pose));
 +  PoseTrace("5 headset Show", g.shown_pose);
