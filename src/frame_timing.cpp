@@ -171,9 +171,9 @@ void mcla_fixed_step_path(PPCRegister& r3, PPCRegister& f11) {
 // two vblanks, which is removed here, so they ran as fast as the host could
 // present: the logo sequence was over in about a second. A swap that follows
 // another with no pass through the frame limiter in between is held to the
-// original 30 per second. Not while the game loop runs (the limiter ran in the last 200 ms): a render thread that
-// outruns the update presents the last image again between updates (MCLA with shadows off, every other swap), and
-// holding those to 30 a second capped the whole game at about 38 updates a second.
+// original 30 per second. Not while the game loop runs (the limiter ran in the last 200 ms): there a swap can follow
+// another without the limiter between (with shadows off), and holding those to 30 a second capped the whole game at
+// about 38 frames a second.
 
 static void PaceUnlimitedSwap() {
   static std::atomic<uint64_t> last_swap_us{0};

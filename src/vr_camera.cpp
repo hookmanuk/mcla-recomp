@@ -36,6 +36,9 @@ namespace {
 
 constexpr uint32_t kMainPerspectiveCaller = 0x822E5EB8;  // the render thread, the main viewport's projection
 constexpr uint32_t kCameraOriginCaller = 0x82312D3C;      // the update thread, the frame's camera into its viewport
+// The update thread's first setting of the frame's camera (from the camera object, sub_8233AF30). The one above is in
+// the sun-shadow phase, which the SHADOWS option leaves out: without this one the camera then went unposed.
+constexpr uint32_t kCameraObjectCaller = 0x8233B438;
 
 // The head pose each main viewport's frame was built with (the update thread fills one of the two viewports while
 // the render thread draws the other): set at the camera's origin, used at the render thread's Perspective call.
@@ -159,7 +162,7 @@ extern "C" REX_FUNC(sub_8217CE80) {
   if (REXCVAR_GET(mcla_vr_camera_log)) {
     ProbeCamera("CE80", ctx.r3.u32, uint32_t(ctx.lr), base, ctx.r4.u32);
   }
-  if (uint32_t(ctx.lr) != kCameraOriginCaller || !vr::Active()) {
+  if ((uint32_t(ctx.lr) != kCameraOriginCaller && uint32_t(ctx.lr) != kCameraObjectCaller) || !vr::Active()) {
     __imp__sub_8217CE80(ctx, base);
     return;
   }
@@ -194,6 +197,39 @@ extern "C" REX_FUNC(sub_8217CE80) {
   for (int i = 0; i < 16; ++i) {
     m[i] = LoadFloat(source + 4 * i);
   }
+  // A camera the game read back from the posed viewport (the camera object's second setting in a frame) is turned
+  // from the camera it came from, not turned again.
+  struct Posed {
+    uint32_t source;
+    float in[16], out[16];
+  };
+  static Posed posed[4]{};
+  Posed* entry = nullptr;
+  for (Posed& p : posed) {
+    if (p.source == ctx.r4.u32 || (!entry && !p.source)) {
+      entry = &p;
+    }
+  }
+  if (!entry) {
+    entry = &posed[ctx.r4.u32 >> 4 & 3];
+  }
+  if (entry->source == ctx.r4.u32) {
+    float difference = 0.f;
+    for (int i = 0; i < 16; ++i) {
+      difference = std::max(difference, std::abs(entry->out[i] - m[i]));
+    }
+    static uint32_t calls = 0, read_back = 0;
+    read_back += difference < 1e-3f;
+    if (++calls % 1000 == 0 && REXCVAR_GET(mcla_vr_camera_log)) {
+      REXLOG_INFO("camera: {} of 1000 posed cameras read back from a posed viewport", read_back);
+      read_back = 0;
+    }
+    if (difference < 1e-3f) {
+      std::memcpy(m, entry->in, sizeof(m));
+    }
+  }
+  entry->source = ctx.r4.u32;
+  std::memcpy(entry->in, m, sizeof(m));
   // The head's axes and position (rows, in the seat's space: x right, y up, z back) taken into the camera's space.
   float out[16];
   for (int r = 0; r < 3; ++r) {
@@ -209,6 +245,7 @@ extern "C" REX_FUNC(sub_8217CE80) {
                                        pose[14] * m[2 * 4 + c]);
   }
   out[15] = m[15];
+  std::memcpy(entry->out, out, sizeof(out));
   uint8_t* target = base + scratch;
   for (int i = 0; i < 16; ++i) {
     StoreFloat(target + 4 * i, out[i]);
