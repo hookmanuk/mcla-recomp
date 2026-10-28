@@ -8281,10 +8281,10 @@ index 0000000..4b721f7
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..ef0e4fc
+index 0000000..670e0f3
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1965 @@
+@@ -0,0 +1,1976 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -9552,6 +9552,34 @@ index 0000000..ef0e4fc
 +      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 +      continue;
 +    }
++    if (g.frame_state.predictedDisplayPeriod > 0) {
++      const uint64_t period = uint64_t(g.frame_state.predictedDisplayPeriod);
++      g.display_period_ns.store(period, std::memory_order_relaxed);
++      if (!g.xr.GetDisplayRefreshRateFB) {
++        const uint64_t shortest = g.refresh_period_ns.load(std::memory_order_relaxed);
++        if (!shortest || period < shortest) {
++          g.refresh_period_ns.store(period, std::memory_order_relaxed);
++        }
++      }
++    }
++    // With a frame cap the head pose and the token go out first, so the game draws its frame (for the display
++    // time N periods on, the frame it will be shown in) while the N - 1 skipped frames are waited out; the wait for
++    // its frame comes after. Token after the skip-wait (20:22, SteamVR, cap 2) left the game and this loop each
++    // waiting on the other with 100 ms timeouts: 9.8 FPS, GPU idle, "Waiting..." in SteamVR.
++    const int cap = std::clamp(REXCVAR_GET(vr_frame_cap), 1, 4);
++    const uint64_t cap_period = g.display_period_ns.load(std::memory_order_relaxed);
++    const XrTime shown_time = g.frame_state.predictedDisplayTime + XrTime(cap > 1 ? uint64_t(cap - 1) * cap_period : 0);
++    {
++      const XrTime now_time = g.frame_state.predictedDisplayTime;
++      g.frame_state.predictedDisplayTime = shown_time;  // UpdateHead predicts for the frame shown
++      UpdateHead();
++      g.frame_state.predictedDisplayTime = now_time;
++    }
++    {
++      std::scoped_lock lock{g.token_mutex};
++      g.flip_token.store(true, std::memory_order_relaxed);  // one game frame per headset frame (while capped)
++    }
++    g.token_cv.notify_all();
 +    // The frame cap (vr_frame_cap N): this loop submits every Nth headset frame; the N - 1 between are left to the
 +    // runtime (an external frame generator fills them). Skipped frames are waited out with xrWaitFrame alone, which
 +    // blocks a period each on a real runtime (SteamVR): a sleep as well made each skipped frame two periods, and the
@@ -9560,10 +9588,9 @@ index 0000000..ef0e4fc
 +    // frame N - 1 periods on, sleeping the remainder only when a call came back early. The wait is here, before the
 +    // token and the head pose, so the game frame released below is drawn for the frame it is shown in.
 +    {
-+      const int cap = std::clamp(REXCVAR_GET(vr_frame_cap), 1, 4);
-+      const uint64_t period = g.display_period_ns.load(std::memory_order_relaxed);
++      const uint64_t period = cap_period;
 +      if (cap > 1 && period) {
-+        const XrTime target = g.frame_state.predictedDisplayTime + XrTime(uint64_t(cap - 1) * period);
++        const XrTime target = shown_time;
 +        for (int calls = 0; calls < 2 * cap && g.frame_state.predictedDisplayTime < target - XrTime(period / 2); ++calls) {
 +          const XrTime before = g.frame_state.predictedDisplayTime;
 +          const auto t0 = std::chrono::steady_clock::now();
@@ -9579,22 +9606,6 @@ index 0000000..ef0e4fc
 +        }
 +      }
 +    }
-+    if (g.frame_state.predictedDisplayPeriod > 0) {
-+      const uint64_t period = uint64_t(g.frame_state.predictedDisplayPeriod);
-+      g.display_period_ns.store(period, std::memory_order_relaxed);
-+      if (!g.xr.GetDisplayRefreshRateFB) {
-+        const uint64_t shortest = g.refresh_period_ns.load(std::memory_order_relaxed);
-+        if (!shortest || period < shortest) {
-+          g.refresh_period_ns.store(period, std::memory_order_relaxed);
-+        }
-+      }
-+    }
-+    {
-+      std::scoped_lock lock{g.token_mutex};
-+      g.flip_token.store(true, std::memory_order_relaxed);  // one game frame per headset frame (while capped)
-+    }
-+    g.token_cv.notify_all();
-+    UpdateHead();
 +    WaitForGameFrame();
 +    std::scoped_lock frame_lock{g.frame_mutex};
 +    {
