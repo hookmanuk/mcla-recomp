@@ -6840,10 +6840,10 @@ index 0000000..924e791
 +	0x00000046,0x0000003f,0x00040063,0x00000037,0x00000038,0x00000046,0x000100fd,0x00010038
 diff --git a/src/ui/vulkan/vr_dlss.cpp b/src/ui/vulkan/vr_dlss.cpp
 new file mode 100644
-index 0000000..baf710c
+index 0000000..7efd3cb
 --- /dev/null
 +++ b/src/ui/vulkan/vr_dlss.cpp
-@@ -0,0 +1,878 @@
+@@ -0,0 +1,908 @@
 +// VR fork: DLSS for the headset's eyes (vr_dlss.h).
 +#include <rex/ui/vulkan/vr_dlss.h>
 +
@@ -6854,6 +6854,7 @@ index 0000000..baf710c
 +#include <cstring>
 +#include <string>
 +#include <unordered_map>
++#include <vector>
 +
 +#include <rex/cvar.h>
 +#include <rex/logging.h>
@@ -7260,8 +7261,7 @@ index 0000000..baf710c
 +  struct Draw {
 +    float world[16];
 +  };
-+  std::unordered_map<uint64_t, Draw> current, previous;
-+  std::unordered_map<uint64_t, uint32_t> order;  // this frame's draws per key so far
++  std::unordered_map<uint64_t, std::vector<Draw>> current, previous;  // by key, in drawing order
 +  float frame_vp[16]{}, previous_vp[16]{};
 +  bool have_frame_vp = false, have_previous_vp = false;
 +  uint32_t tag = 1;
@@ -7357,7 +7357,6 @@ index 0000000..baf710c
 +  // The draws' history: this frame's becomes the last.
 +  objects.previous.swap(objects.current);
 +  objects.current.clear();
-+  objects.order.clear();
 +  std::memcpy(objects.previous_vp, objects.frame_vp, sizeof(objects.frame_vp));
 +  objects.have_previous_vp = objects.have_frame_vp;
 +  objects.have_frame_vp = false;
@@ -7416,18 +7415,49 @@ index 0000000..baf710c
 +      objects.render_height > objects.height) {
 +    return false;
 +  }
-+  const uint64_t ordered = key * 0x100000001B3ull + objects.order[key]++;
-+  Objects::Draw& draw = objects.current[ordered];
-+  std::memcpy(draw.world, world, sizeof(draw.world));
-+  const auto previous = objects.previous.find(ordered);
++  std::vector<Objects::Draw>& draws = objects.current[key];
++  const size_t index = draws.size();
++  std::memcpy(draws.emplace_back().world, world, sizeof(Objects::Draw::world));
++  const auto previous_draws = objects.previous.find(key);
++  if (previous_draws == objects.previous.end() || !objects.have_previous_vp) {
++    return false;
++  }
++  // Last frame's draw of this one: the same place among the key's draws when it has not moved (most of the city:
++  // the scene's depth gives it the camera's motion), else the key's draw nearest where this one is, within a few
++  // metres. The draws of one model (trees, lamps) share a key and come and go with culling while driving, so the
++  // same place often holds another instance: its motion was the distance between the two (DLSS smeared trees).
++  const std::vector<Objects::Draw>& candidates = previous_draws->second;
++  const auto unmoved = [world](const Objects::Draw& d) {
++    for (int i = 0; i < 16; ++i) {
++      if (std::abs(d.world[i] - world[i]) > 1e-4f * (1.f + std::abs(world[i]))) {
++        return false;
++      }
++    }
++    return true;
++  };
++  if (index < candidates.size() && unmoved(candidates[index])) {
++    return false;
++  }
++  const Objects::Draw* previous = nullptr;
++  float nearest = 5.f * 5.f;  // metres, squared (a fast car moves ~1 m a frame)
++  for (const Objects::Draw& d : candidates) {
++    const float x = d.world[12] - world[12], y = d.world[13] - world[13], z = d.world[14] - world[14];
++    if (const float distance = x * x + y * y + z * z; distance < nearest) {
++      if (unmoved(d)) {
++        return false;
++      }
++      nearest = distance;
++      previous = &d;
++    }
++  }
 +  float inverse[16];
-+  if (previous == objects.previous.end() || !objects.have_previous_vp || !Invert(world_view_projection, inverse)) {
++  if (!previous || !Invert(world_view_projection, inverse)) {
 +    return false;
 +  }
 +  // This frame's clip position to the previous frame's: back through this WVP, out through the last world and
 +  // view-projection.
 +  float previous_wvp[16];
-+  Multiply(previous->second.world, objects.previous_vp, previous_wvp);
++  Multiply(previous->world, objects.previous_vp, previous_wvp);
 +  Multiply(inverse, previous_wvp, push.clip_to_prev);
 +  push.size_x = float(objects.render_width);
 +  push.size_y = float(objects.render_height);
