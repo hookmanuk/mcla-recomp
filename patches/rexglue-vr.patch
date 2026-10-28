@@ -8281,10 +8281,10 @@ index 0000000..4b721f7
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..44b7418
+index 0000000..9d493c1
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1949 @@
+@@ -0,0 +1,1953 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -9087,9 +9087,12 @@ index 0000000..44b7418
 +                          2 * (xy - wz),     1 - 2 * (xx + zz), 2 * (yz + wx),     0,
 +                          2 * (xz + wy),     2 * (yz - wx),     1 - 2 * (xx + yy), 0,
 +                          p.x,               p.y,               p.z,               1};
++  // No overscan: rendering a wider field for head turns at low frame rates (1.15x, slow frames or a frame cap)
++  // showed the middle 87% of the eye's pixels on the panel, 1.15x coarser in each direction at every size ("the source
++  // pixels are bigger than they should be", Matt 2026-10-28). MCLA_VR_OVERSCAN=1.15 for the old behaviour.
 +  static const float overscan_factor = [] {
 +    const char* v = std::getenv("MCLA_VR_OVERSCAN");
-+    return v ? std::max(1.f, float(std::atof(v))) : 1.15f;
++    return v ? std::max(1.f, float(std::atof(v))) : 1.f;
 +  }();
 +  const float overscan =
 +      g.slow_frames.load(std::memory_order_relaxed) || REXCVAR_GET(vr_frame_cap) > 1 ? overscan_factor : 1.f;
@@ -9634,10 +9637,11 @@ index 0000000..44b7418
 +  const double rate = g.flips / seconds, hz = 1e9 / double(period);
 +  {  // slow frames: overscan (State::slow_frames)
 +    const bool slow = g.slow_frames.load(std::memory_order_relaxed);
-+    if (!slow && rate < 0.8 * hz) {
++    const double capped_hz = hz / std::clamp(REXCVAR_GET(vr_frame_cap), 1, 4);
++    if (!slow && rate < 0.8 * capped_hz) {
 +      g.slow_frames = true;
-+      Log("slow frames (%.0f FPS at %.0f Hz): rendering wider for head turns", rate, hz);
-+    } else if (slow && rate > 0.95 * hz) {
++      Log("slow frames (%.0f FPS at %.0f Hz)", rate, capped_hz);
++    } else if (slow && rate > 0.95 * capped_hz) {
 +      g.slow_frames = false;
 +      Log("frames back at the headset's rate (%.0f FPS)", rate);
 +    }
@@ -12356,6 +12360,18 @@ index c96636e..ef01614 100644
  #if REX_PLATFORM_PS5
    // Nothing can be seen of presentation on the console except the screen, so
    // the first few paints and then one in every 300 are logged: that it was
+diff --git a/thirdparty/FFmpeg b/thirdparty/FFmpeg
+--- a/thirdparty/FFmpeg
++++ b/thirdparty/FFmpeg
+@@ -1 +1 @@
+-Subproject commit 0604b464c7cb4ebc94940cf1f324a3b26b87717c
++Subproject commit 0604b464c7cb4ebc94940cf1f324a3b26b87717c-dirty
+diff --git a/thirdparty/libmspack b/thirdparty/libmspack
+--- a/thirdparty/libmspack
++++ b/thirdparty/libmspack
+@@ -1 +1 @@
+-Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837
++Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837-dirty
 diff --git a/thirdparty/openxr/include/openxr/openxr.h b/thirdparty/openxr/include/openxr/openxr.h
 new file mode 100644
 index 0000000..af56c0f
