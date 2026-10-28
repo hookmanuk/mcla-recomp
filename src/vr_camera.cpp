@@ -27,6 +27,7 @@ REX_EXTERN(__imp__sub_8217D460);
 REX_EXTERN(__imp__sub_8217CE80);
 REX_EXTERN(__imp__sub_8217CFD0);
 REX_EXTERN(__imp__sub_822AA040);
+REX_EXTERN(__imp__sub_8230BC38);
 
 REXCVAR_DEFINE_DOUBLE(mcla_vr_world_scale, 1.0, "MCLA", "VR: game units per metre of head movement");
 REXCVAR_DEFINE_BOOL(mcla_vr_camera_log, false, "MCLA", "VR, development: log the main camera's matrices");
@@ -65,6 +66,9 @@ struct Posed {
 };
 Posed g_posed_history[16]{};
 uint32_t g_posed_history_next = 0;
+// The update thread's latest posing of the frame's camera: the game's camera (rows) and the head pose it got.
+bool g_update_posed = false;
+float g_update_game[16], g_update_pose[16];
 FramePose g_frame_poses[2];
 
 // The cockpit camera's sway: the game slides the cockpit camera along the car as it accelerates (~15 cm back) and
@@ -240,6 +244,68 @@ void HoldCockpitCamera(uint8_t* base, float (&m)[16], bool learn) {
 }
 
 }  // namespace
+
+// The tree impostors (DISTANT TREES): the game re-renders each one's picture, round-robin, from the direction the
+// camera looks (sub_8230BC38(entry, direction, ...) builds the render camera from *r4; callers 0x8230C834 and
+// 0x8230E084). That camera is the posed one in VR, so every tree's picture was redrawn from wherever the head pointed:
+// the trees, and the shading on them, turned with the head (the cards' orientation had nothing to do with it). A
+// direction that is the posed camera's back (or its forward) gets the game camera's instead; the sun's directions
+// (sub_8230D988's, the shadow pictures) are left. MCLA_VR_IMPOSTOR_DIR=0 leaves them all; MCLA_VR_IMPOSTOR_LOG=1
+// counts them every 2 s.
+extern "C" REX_FUNC(sub_8230BC38) {
+  static const bool enabled = !(std::getenv("MCLA_VR_IMPOSTOR_DIR") && std::getenv("MCLA_VR_IMPOSTOR_DIR")[0] == '0');
+  static const bool log = std::getenv("MCLA_VR_IMPOSTOR_LOG") != nullptr;
+  float M[16], P[16];
+  bool posed;
+  {
+    std::scoped_lock lock{g_pose_mutex};
+    posed = g_update_posed && vr::Active();
+    std::memcpy(M, g_update_game, sizeof(M));
+    std::memcpy(P, g_update_pose, sizeof(P));
+  }
+  static uint32_t replaced = 0, left = 0;
+  if (posed) {
+    const uint8_t* v = base + ctx.r4.u32;
+    float dir[3], posed_back[3];
+    for (int i = 0; i < 3; ++i) {
+      dir[i] = LoadFloat(v + 4 * i);
+      posed_back[i] = P[8] * M[i] + P[9] * M[4 + i] + P[10] * M[8 + i];
+    }
+    float sign = 0.f;
+    for (const float candidate : {1.f, -1.f}) {
+      bool same = true;
+      for (int i = 0; i < 3 && same; ++i) {
+        same = std::abs(dir[i] - candidate * posed_back[i]) < 0.05f;
+      }
+      if (same) {
+        sign = candidate;
+      }
+    }
+    if (sign != 0.f && enabled) {
+      static uint32_t scratch = 0;
+      if (!scratch) {
+        scratch = rex::Runtime::instance()->memory()->SystemHeapAlloc(16, 16);
+      }
+      for (int i = 0; i < 3; ++i) {
+        StoreFloat(base + scratch + 4 * i, sign * M[8 + i]);
+      }
+      StoreFloat(base + scratch + 12, LoadFloat(v + 12));
+      ctx.r4.u32 = scratch;
+      ++replaced;
+    } else {
+      ++left;
+    }
+  }
+  if (log) {
+    static auto window = std::chrono::steady_clock::now();
+    if (std::chrono::steady_clock::now() - window > std::chrono::seconds(2)) {
+      REXLOG_INFO("impostor directions: {} the camera's (replaced), {} other", replaced, left);
+      replaced = left = 0;
+      window = std::chrono::steady_clock::now();
+    }
+  }
+  __imp__sub_8230BC38(ctx, base);
+}
 
 // The game camera's update (r3 the camera): when it rewrites the director's camera it is the active camera, and its
 // target is the car the cockpit camera rides in (HoldCockpitCamera).
@@ -462,6 +528,11 @@ extern "C" REX_FUNC(sub_8217CE80) {
     Posed& p = g_posed_history[g_posed_history_next++ % 16];
     std::memcpy(p.in, game, sizeof(p.in));
     std::memcpy(p.out, out, sizeof(p.out));
+    if (uint32_t(ctx.lr) == kCameraObjectCaller) {
+      std::memcpy(g_update_game, game, sizeof(g_update_game));
+      std::memcpy(g_update_pose, pose, sizeof(g_update_pose));
+      g_update_posed = true;
+    }
   }
   {
     std::scoped_lock lock{g_pose_mutex};
