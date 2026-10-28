@@ -527,6 +527,12 @@ constexpr int kVrHeadsetMax = 7;
 const char* kVrHeadsetValues[kVrHeadsetMax] = {"noaa", "msaa", "dlaa", "1.25", "1.5", "1.75", "2"};
 const char* kVrHeadsetLabels[kVrHeadsetMax] = {"NO AA", "MSAA (RESTART)", "DLAA"};
 
+// DLSS's model (NGX's render preset), live: NGX's choice per mode, the transformers (K, J; L, M lighter) or the older
+// convolutional ones (F, E).
+constexpr const char* kVrDlssModelValues[] = {"default", "K", "J", "M", "L", "F", "E"};
+const char* kVrDlssModelLabels[] = {"DEFAULT", "K TRANSFORMER", "J TRANSFORMER", "M TRANSFORMER 2",
+                                    "L TRANSFORMER 2", "F CNN", "E CNN"};
+
 // The frame cap: frames to OpenXR at 1/N of the headset's refresh (for an external frame generator), live; labels with
 // the rate they make (VrFrameCapLabels, when the menu is made).
 constexpr const char* kVrFrameCapValues[] = {"1", "2", "3"};
@@ -555,6 +561,8 @@ ItemDef kVrItems[] = {
      kVrResolutionLabels, nullptr, kVrResolutionCount},
     {"PM_MxVrHeadset", ItemKind::kStringChoice, "vr_headset_size", "HEADSET SIZE",
      kVrHeadsetValues, kVrHeadsetLabels, nullptr, kVrHeadsetMax},
+    {"PM_MxVrDlssModel", ItemKind::kStringChoice, "vr_dlss_model", "DLSS MODEL", kVrDlssModelValues,
+     kVrDlssModelLabels, nullptr, 7},
     {"PM_MxVrFrameCap", ItemKind::kStringChoice, "vr_frame_cap", "FRAME RATE CAP", kVrFrameCapValues,
      kVrFrameCapLabels, nullptr, 3},
 };

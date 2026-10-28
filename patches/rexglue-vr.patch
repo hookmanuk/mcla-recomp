@@ -6840,15 +6840,16 @@ index 0000000..924e791
 +	0x00000046,0x0000003f,0x00040063,0x00000037,0x00000038,0x00000046,0x000100fd,0x00010038
 diff --git a/src/ui/vulkan/vr_dlss.cpp b/src/ui/vulkan/vr_dlss.cpp
 new file mode 100644
-index 0000000..7efd3cb
+index 0000000..4b721f7
 --- /dev/null
 +++ b/src/ui/vulkan/vr_dlss.cpp
-@@ -0,0 +1,908 @@
+@@ -0,0 +1,966 @@
 +// VR fork: DLSS for the headset's eyes (vr_dlss.h).
 +#include <rex/ui/vulkan/vr_dlss.h>
 +
 +#include <algorithm>
 +#include <array>
++#include <cctype>
 +#include <cmath>
 +#include <cstdlib>
 +#include <cstring>
@@ -6879,6 +6880,10 @@ index 0000000..7efd3cb
 +                    "and MSAA headset sizes, switchable to DLSS while playing)");
 +REXCVAR_DEFINE_DOUBLE(vr_dlss_output_scale, 1.0, "VR",
 +                      "DLSS's output to the headset at this scale of the render size (1: DLAA; 1.5: an upscale)");
++REXCVAR_DEFINE_STRING(vr_dlss_model, "default", "VR",
++                      "Live: DLSS's model (NGX render preset): default (NGX's choice per mode: K for DLAA to Balanced, "
++                      "M for Performance), J or K (transformer), L or M (second transformer, lighter), E or F (the "
++                      "older convolutional ones)");
 +
 +namespace rex::ui::vulkan::vr::dlss {
 +
@@ -7110,6 +7115,9 @@ index 0000000..7efd3cb
 +  Image depth, motion, input, output;
 +  float previous_vp[16]{};
 +  bool have_previous = false;
++  // Before this frame's first depth (a later scene resolve in the frame takes it again).
++  float previous_vp_before[16]{};
++  bool have_previous_before = false;
 +  uint32_t previous_tag = 0;  // the frame of the last depth and motion
 +  uint32_t previous_tag_before = 0;
 +  bool cut = false;
@@ -7120,6 +7128,7 @@ index 0000000..7efd3cb
 +  // using the old are done (CreateFeature releases the old at once), the plain copy meanwhile.
 +  bool feature_hold = false;
 +  uint32_t feature_hold_until = 0;
++  uint32_t preset = 0;  // the feature's NGX render preset (0: NGX's default)
 +  float jitter_x = 0.f, jitter_y = 0.f;  // the frame's, render pixels (for DLSS)
 +};
 +std::array<Eye, 2> eyes;
@@ -7159,10 +7168,25 @@ index 0000000..7efd3cb
 +  }
 +}
 +
++// vr_dlss_model as NGX's render preset: A is 1, B 2 and so on; 0 for NGX's default.
++uint32_t Preset() {
++  const std::string model = REXCVAR_GET(vr_dlss_model);
++  return model.size() == 1 && std::toupper(model[0]) >= 'A' && std::toupper(model[0]) <= 'O'
++             ? uint32_t(std::toupper(model[0]) - 'A' + 1)
++             : 0;
++}
++
 +bool EnsureEye(Eye& eye, uint32_t width, uint32_t height, uint32_t frame) {
 +  current_frame = frame;
 +  if (!retired.empty()) {
 +    DestroyRetired(frame);
++  }
++  if (eye.feature && eye.preset != Preset()) {  // the settings menu's model: made again, as for a new size
++    eye.feature = false;
++    eye.feature_hold = true;
++    eye.feature_hold_until = frame + 16;
++    eye.have_previous = false;
++    REXLOG_INFO("VR DLSS: model {}: the new feature in 16 frames", REXCVAR_GET(vr_dlss_model));
 +  }
 +  uint32_t output_width, output_height;
 +  OutputSize(width, height, output_width, output_height);
@@ -7250,6 +7274,10 @@ index 0000000..7efd3cb
 +  float vp[16]{};
 +  bool valid = false;
 +  uint32_t taken = 0;  // the frame its depth was taken
++  // This frame's scene resolves with the first one's camera so far, its camera, and the last frame's count: the
++  // depth is taken at that one (the frame's last) and any after it.
++  uint32_t resolves = 0, last_frame_resolves = 0;
++  float first_vp[16]{};
 +} scene;
 +
 +// The object motion image the pixel shaders write (the right eye's: its twin), and each draw's world matrix by key
@@ -7354,6 +7382,15 @@ index 0000000..7efd3cb
 +  if (!g.ready || !width || !height) {
 +    return;
 +  }
++  if (scene.taken != objects.tag && scene.resolves) {  // the frame ended before the resolve its depth waited for
++    static int count = 0;
++    if (++count % 100 == 1) {
++      REXLOG_INFO("VR DLSS: frame {} had {} scene resolves, the last frame {}: no depth ({} so far)", objects.tag,
++                  scene.resolves, scene.last_frame_resolves, count);
++    }
++  }
++  scene.last_frame_resolves = scene.resolves;
++  scene.resolves = 0;
 +  // The draws' history: this frame's becomes the last.
 +  objects.previous.swap(objects.current);
 +  objects.current.clear();
@@ -7469,11 +7506,24 @@ index 0000000..7efd3cb
 +  if (!g.ready || !scene.valid) {
 +    return false;
 +  }
-+  if (scene.taken == objects.tag) {  // once a frame: a later pass's camera is not the scene's
-+    static int count = 0;
-+    if (++count % 100 == 1) {
-+      REXLOG_INFO("VR DLSS: a second scene resolve in frame {} ({} so far)", objects.tag, count);
++  // A frame's scene resolves come after its depth prepass (~340 draws, no colour) and after the visible draws (~1200
++  // more): the last one with the scene's camera is the one (the prepass's depth has no foliage the prepass leaves out,
++  // and the visible draws' own motion is stored after it). A later pass with another camera is not the scene.
++  // MCLA_VR_DEPTH_TAKE=first (development): the first only, as before.
++  static const bool first_only = std::getenv("MCLA_VR_DEPTH_TAKE") && std::getenv("MCLA_VR_DEPTH_TAKE")[0] == 'f';
++  if (scene.resolves) {
++    bool same = !first_only;
++    for (int i = 0; same && i < 16; ++i) {
++      same = std::abs(scene.vp[i] - scene.first_vp[i]) <= 1e-5f * (1.f + std::abs(scene.first_vp[i]));
 +    }
++    if (!same) {
++      scene.valid = false;
++      return false;
++    }
++  } else {
++    std::memcpy(scene.first_vp, scene.vp, sizeof(scene.vp));
++  }
++  if (++scene.resolves < scene.last_frame_resolves) {  // a later one comes (as last frame)
 +    scene.valid = false;
 +    return false;
 +  }
@@ -7527,6 +7577,13 @@ index 0000000..7efd3cb
 +  } push{};
 +  push.tag = float(frame);
 +  float inverse[16];
++  if (eye.have_previous && eye.previous_tag == frame) {  // a later depth this frame: from where the first started
++    std::memcpy(eye.previous_vp, eye.previous_vp_before, sizeof(vp));
++    eye.have_previous = eye.have_previous_before;
++    eye.previous_tag = eye.previous_tag_before;
++  }
++  std::memcpy(eye.previous_vp_before, eye.previous_vp, sizeof(vp));
++  eye.have_previous_before = eye.have_previous;
 +  const bool follows = eye.have_previous && eye.previous_tag % 4096 + 1 == frame;
 +  eye.previous_tag_before = eye.previous_tag;
 +  eye.cut = false;
@@ -7623,13 +7680,14 @@ index 0000000..7efd3cb
 +    // DLAA at the render size; else the mode nearest the scale (Quality 1.5x, Balanced 1.72x, Performance 2x).
 +    const double scale = double(eye.output.width) / double(width);
 +    feature.quality = scale < 1.01 ? 0 : scale < 1.6 ? 1 : scale < 1.86 ? 2 : 3;
++    feature.preset = eye.preset = Preset();
 +    if (!g.api->CreateFeature(cmd, &feature)) {
 +      REXLOG_WARN("VR DLSS: the eye's feature could not be made");
 +      return false;
 +    }
 +    eye.feature = true;
-+    REXLOG_INFO("VR DLSS: eye {} feature, {}x{} -> {}x{} (quality {})", index, width, height, eye.output.width,
-+                eye.output.height, feature.quality);
++    REXLOG_INFO("VR DLSS: eye {} feature, {}x{} -> {}x{} (quality {}, model {})", index, width, height,
++                eye.output.width, eye.output.height, feature.quality, REXCVAR_GET(vr_dlss_model));
 +  }
 +  // The scene into DLSS's input (its own format).
 +  VkImageBlit blit{};
