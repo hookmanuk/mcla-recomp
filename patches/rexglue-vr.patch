@@ -49,8 +49,28 @@ index 3bbd52e..30a2c7f 100644
  
    // Render targets actually used by the draw call with the last successful
    // update. 0 is depth, color starting from 1, nullptr if not bound.
+diff --git a/include/rex/graphics/pipeline/shader/shader.h b/include/rex/graphics/pipeline/shader/shader.h
+index 4cf3854..0384ab7 100644
+--- a/include/rex/graphics/pipeline/shader/shader.h
++++ b/include/rex/graphics/pipeline/shader/shader.h
+@@ -630,6 +630,15 @@ void ParseTextureFetchInstruction(const ucode::TextureFetchInstruction& op,
+ void ParseAluInstruction(const ucode::AluInstruction& op, xenos::ShaderType shader_type,
+                          ParsedAluInstruction& instr);
+ 
++// VR fork: vertex shaders of camera-facing cards. In VR the camera carries the head's turn, so every card turned with
++// the head; the SPIR-V translator faces each card to the camera's position (c15) from its own anchor (the first
++// vfetch_full of 3 floats) instead. MCLA_VR_BILLBOARD=0: as the game draws them.
++enum class VrBillboard {
++  kNone,
++  kHorizontalAxes,  // MCLA's bushes: spread along c208 (the camera's right) and c209 (its up), both made level
++};
++VrBillboard VrBillboardShader(xenos::ShaderType type, uint64_t ucode_data_hash);
++
+ class Shader {
+  public:
+   // Type of the vertex shader on the host - shader interface depends on in, so
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index 4eb6935..365d622 100644
+index 4eb6935..ab6f50b 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
 @@ -897,6 +897,21 @@ class SpirvShaderTranslator : public ShaderTranslator {
@@ -75,6 +95,18 @@ index 4eb6935..365d622 100644
    spv::Id uniform_float_constants_;
    spv::Id uniform_bool_loop_constants_;
    spv::Id uniform_fetch_constants_;
+@@ -983,6 +998,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   // `base + index * stride` in dwords from the last vfetch_full as it may be
+   // needed by vfetch_mini - int.
+   spv::Id var_main_vfetch_address_;
++  // VR fork (VrBillboardShader): the card's centre (float3, the first vfetch_full of 3 floats at offset 0).
++  VrBillboard vr_billboard_ = VrBillboard::kNone;
++  bool vr_billboard_centre_stored_ = false;
++  spv::Id var_main_vr_billboard_centre_ = spv::NoResult;
++  spv::Id VrBillboardAxis(uint32_t constant);
+   // float.
+   spv::Id var_main_tfetch_lod_;
+   // float3.
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
 index d26cd4f..6041fdc 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
@@ -1385,7 +1417,7 @@ index 953c5fd..0e3ac7b 100644
    if (are_accumulated_render_targets_valid_) {
      // Check if the only re-enabling a previously bound render target.
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..9b00411 100644
+index 1774f97..d657826 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
 @@ -12,6 +12,7 @@
@@ -1416,7 +1448,21 @@ index 1774f97..9b00411 100644
    var_main_registers_ = spv::NoResult;
    var_main_memexport_address_ = spv::NoResult;
    for (size_t memexport_eM_index = 0; memexport_eM_index < rex::countof(var_main_memexport_data_);
-@@ -1635,7 +1642,80 @@ void SpirvShaderTranslator::EnsureBuildPointAvailable() {
+@@ -499,6 +506,13 @@ void SpirvShaderTranslator::StartTranslation() {
+     var_main_vfetch_address_ =
+         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_int_,
+                                  "xe_var_vfetch_address", const_int_0_);
++    vr_billboard_ = VrBillboardShader(current_shader().type(), current_shader().ucode_data_hash());
++    vr_billboard_centre_stored_ = false;
++    if (vr_billboard_ != VrBillboard::kNone) {  // VR fork
++      var_main_vr_billboard_centre_ =
++          builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_float3_,
++                                   "xe_var_vr_billboard_centre", const_float3_0_);
++    }
+     var_main_tfetch_lod_ =
+         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_float_,
+                                  "xe_var_tfetch_lod", const_float_0_);
+@@ -1635,7 +1649,80 @@ void SpirvShaderTranslator::EnsureBuildPointAvailable() {
    builder_->setBuildPoint(&new_block);
  }
  
@@ -1497,7 +1543,7 @@ index 1774f97..9b00411 100644
    if (IsSpirvComputeShader()) {
      // For memexport fallback execution, each invocation corresponds to one
      // guest vertex processing index.
-@@ -2509,6 +2589,36 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
+@@ -2509,6 +2596,36 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
      }
    }
  
@@ -1534,7 +1580,7 @@ index 1774f97..9b00411 100644
    uint32_t clip_distance_next_component = 0;
    uint32_t cull_distance_next_component = 0;
    // Clip against user clip planes.
-@@ -2817,6 +2927,27 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
+@@ -2817,6 +2934,27 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
  }
  
  void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
@@ -1562,7 +1608,7 @@ index 1774f97..9b00411 100644
    Modification shader_modification = GetSpirvShaderModification();
  
    if (edram_fragment_shader_interlock_) {
-@@ -2908,6 +3039,14 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
+@@ -2908,6 +3046,14 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
                              spv::BuiltInFragCoord);
      main_interface_.push_back(input_fragment_coordinates_);
    }
@@ -1577,11 +1623,133 @@ index 1774f97..9b00411 100644
  
    // Is front facing.
    if (edram_fragment_shader_interlock_ ||
+@@ -3496,7 +3642,91 @@ spv::Id SpirvShaderTranslator::GetStorageAddressingIndex(
+   return index;
+ }
+ 
++// VR fork: a camera-facing card's axis (kHorizontalAxes: c208, the camera's right, level, or c209, its up made level)
++// for a camera at c15 looking at the card's anchor (in the world: through c0-c3): the same at any head pose. Seen from
++// steeply above or below (the minimap's camera, 7 km up) the game's own axes.
++spv::Id SpirvShaderTranslator::VrBillboardAxis(uint32_t constant) {
++  const Shader::ConstantRegisterMap& map = current_shader().constant_register_map();
++  auto load_constant = [&](uint32_t index) {
++    id_vector_temp_util_.clear();
++    id_vector_temp_util_.push_back(const_int_0_);
++    id_vector_temp_util_.push_back(builder_->makeIntConstant(int(map.GetPackedFloatConstantIndex(index))));
++    return builder_->createLoad(
++        builder_->createAccessChain(spv::StorageClassUniform, uniform_float_constants_, id_vector_temp_util_),
++        spv::NoPrecision);
++  };
++  auto component = [&](spv::Id vector, unsigned int i) {
++    return builder_->createCompositeExtract(vector, type_float_, i);
++  };
++  auto binary = [&](spv::Op op, spv::Id a, spv::Id b) { return builder_->createBinOp(op, type_float_, a, b); };
++  const spv::Id original = load_constant(constant);
++  uint_vector_temp_util_.assign({0, 1, 2});
++  const spv::Id camera =
++      builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_, load_constant(15), uint_vector_temp_util_);
++  spv::Id centre = builder_->createLoad(var_main_vr_billboard_centre_, spv::NoPrecision);
++  {
++    spv::Id world = builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_, load_constant(3),
++                                                  uint_vector_temp_util_);
++    for (unsigned int i = 0; i < 3; ++i) {
++      world = builder_->createBinOp(
++          spv::OpFAdd, type_float3_, world,
++          builder_->createBinOp(spv::OpVectorTimesScalar, type_float3_,
++                                builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_, load_constant(i),
++                                                              uint_vector_temp_util_),
++                                component(centre, i)));
++    }
++    centre = world;
++  }
++  // Within ~72 degrees of level (false for NaN: a zero direction).
++  auto level_enough = [&](spv::Id direction) {
++    return builder_->createBinOp(
++        spv::OpFOrdLessThan, type_bool_,
++        builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs, component(direction, 1)),
++        builder_->makeFloatConstant(0.95f));
++  };
++  // The game sets c208 = k x the camera's right (level) and c209 = k x its up made level (k sin(pitch) along the
++  // level forward); the same for a camera looking from c15 at the anchor: d its direction, g = d made level:
++  // c208 = k (-g.z, 0, g.x), c209 = k (-d.y) g.
++  const spv::Id d = builder_->createUnaryBuiltinCall(
++      type_float3_, ext_inst_glsl_std_450_, GLSLstd450Normalize,
++      builder_->createBinOp(spv::OpFSub, type_float3_, centre, camera));
++  id_vector_temp_util_.assign({component(d, 0), component(d, 2)});
++  const spv::Id g = builder_->createUnaryBuiltinCall(
++      type_float2_, ext_inst_glsl_std_450_, GLSLstd450Normalize,
++      builder_->createCompositeConstruct(type_float2_, id_vector_temp_util_));
++  const spv::Id across = load_constant(208);
++  uint_vector_temp_util_.assign({0, 2});
++  const spv::Id k = builder_->createUnaryBuiltinCall(
++      type_float_, ext_inst_glsl_std_450_, GLSLstd450Length,
++      builder_->createRvalueSwizzle(spv::NoPrecision, type_float2_, across, uint_vector_temp_util_));
++  spv::Id x, z;
++  if (constant == 208) {
++    x = binary(spv::OpFMul, k, builder_->createUnaryOp(spv::OpFNegate, type_float_, component(g, 1)));
++    z = binary(spv::OpFMul, k, component(g, 0));
++  } else {
++    const spv::Id tilt =
++        binary(spv::OpFMul, k, builder_->createUnaryOp(spv::OpFNegate, type_float_, component(d, 1)));
++    x = binary(spv::OpFMul, tilt, component(g, 0));
++    z = binary(spv::OpFMul, tilt, component(g, 1));
++  }
++  id_vector_temp_util_.assign({x, component(original, 1), z, component(original, 3)});
++  // Only when asked per draw: c208.w (unused by the game) is 1 for facing cards (the renderer's vr_foliage), else the
++  // constants as given (fixed cards: the game camera's axes, or the game's own).
++  const spv::Id wanted = builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_, component(across, 3),
++                                               builder_->makeFloatConstant(0.5f));
++  return builder_->createTriOp(spv::OpSelect, type_float4_,
++                               builder_->createBinOp(spv::OpLogicalAnd, type_bool_, level_enough(d), wanted),
++                               builder_->createCompositeConstruct(type_float4_, id_vector_temp_util_), original);
++}
++
+ spv::Id SpirvShaderTranslator::LoadOperandStorage(const InstructionOperand& operand) {
++  if (vr_billboard_ != VrBillboard::kNone && vr_billboard_centre_stored_ &&  // VR fork
++      operand.storage_source == InstructionStorageSource::kConstantFloat &&
++      operand.storage_addressing_mode == InstructionStorageAddressingMode::kAbsolute &&
++      (operand.storage_index == 208 || operand.storage_index == 209)) {
++    EnsureBuildPointAvailable();
++    return VrBillboardAxis(operand.storage_index);
++  }
+   spv::Id index =
+       GetStorageAddressingIndex(operand.storage_addressing_mode, operand.storage_index,
+                                 operand.storage_source == InstructionStorageSource::kConstantFloat);
 diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
-index 9ce3bb4..1a9317c 100644
+index 9ce3bb4..f3f3242 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
-@@ -647,21 +647,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+@@ -93,6 +93,29 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+     }
+     // Store the address for the subsequent vfetch_mini.
+     builder_->createStore(address, var_main_vfetch_address_);
++    // VR fork (VrBillboardShader): the card's centre, the first 3 floats at offset 0.
++    if (vr_billboard_ != VrBillboard::kNone && !vr_billboard_centre_stored_ && !instr.attributes.offset &&
++        instr.attributes.data_format == xenos::VertexFormat::k_32_32_32_FLOAT) {
++      vr_billboard_centre_stored_ = true;
++      spv::Id centre_words[3];
++      for (int i = 0; i < 3; ++i) {
++        centre_words[i] = LoadUint32FromSharedMemory(
++            i ? builder_->createBinOp(spv::OpIAdd, type_int_, address, builder_->makeIntConstant(i)) : address);
++      }
++      id_vector_temp_.assign(centre_words, centre_words + 3);
++      spv::Id centre = builder_->createCompositeConstruct(type_uint3_, id_vector_temp_);
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(const_int_0_);
++      id_vector_temp_.push_back(builder_->makeIntConstant(int((fetch_constant_word_0_index + 1) >> 2)));
++      id_vector_temp_.push_back(builder_->makeIntConstant(int((fetch_constant_word_0_index + 1) & 3)));
++      const spv::Id fetch_constant_word_1 = builder_->createLoad(
++          builder_->createAccessChain(spv::StorageClassUniform, uniform_fetch_constants_, id_vector_temp_),
++          spv::NoPrecision);
++      centre = EndianSwap32Uint(centre, builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, fetch_constant_word_1,
++                                                              builder_->makeUintConstant(0b11)));
++      builder_->createStore(builder_->createUnaryOp(spv::OpBitcast, type_float3_, centre),
++                            var_main_vr_billboard_centre_);
++    }
+   }
+ 
+   if (!needed_words) {
+@@ -647,21 +670,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
        sampler = builder_->createLoad(sampler_bindings_[sampler_index].variable, spv::NoPrecision);
        const TextureBinding& image_2d_array_or_cube_unsigned_binding =
            texture_bindings_[image_2d_array_or_cube_unsigned_index];
@@ -1607,7 +1775,7 @@ index 9ce3bb4..1a9317c 100644
        }
      }
  
-@@ -2068,6 +2065,24 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+@@ -2068,6 +2088,24 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
    StoreResult(instr.result, result_vector);
  }
  
@@ -1632,7 +1800,7 @@ index 9ce3bb4..1a9317c 100644
  size_t SpirvShaderTranslator::FindOrAddTextureBinding(uint32_t fetch_constant,
                                                        xenos::FetchOpDimension dimension,
                                                        bool is_signed) {
-@@ -2109,10 +2124,14 @@ size_t SpirvShaderTranslator::FindOrAddTextureBinding(uint32_t fetch_constant,
+@@ -2109,10 +2147,14 @@ size_t SpirvShaderTranslator::FindOrAddTextureBinding(uint32_t fetch_constant,
        is_array = true;
        dimension_name = "2d";
    }
@@ -1743,6 +1911,52 @@ index 22bb3e9..c72dbe9 100644
    uint32_t color_targets_written = current_shader().writes_color_targets();
  
    if ((color_targets_written & 0b1) && !IsExecutionModeEarlyFragmentTests()) {
+diff --git a/src/graphics/pipeline/shader/translator.cpp b/src/graphics/pipeline/shader/translator.cpp
+index e472251..8642f9d 100644
+--- a/src/graphics/pipeline/shader/translator.cpp
++++ b/src/graphics/pipeline/shader/translator.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cstdarg>
++#include <cstdlib>
+ #include <cstring>
+ #include <set>
+ #include <string>
+@@ -46,6 +47,23 @@ using namespace ucode;
+ // Lots of naming comes from the disassembly spit out by the XNA GS compiler
+ // and dumps of d3dcompiler and games: https://pastebin.com/i4kAv7bB
+ 
++VrBillboard VrBillboardShader(xenos::ShaderType type, uint64_t ucode_data_hash) {
++  static const bool enabled = [] {
++    const char* v = std::getenv("MCLA_VR_BILLBOARD");
++    return !(v && v[0] == '0');
++  }();
++  if (!enabled || type != xenos::ShaderType::kVertex) {
++    return VrBillboard::kNone;
++  }
++  switch (ucode_data_hash) {
++    case 0x4D181C0D99016B72ull:  // bushes
++    case 0xAD73CDF775982D19ull:  // bushes, depth
++      return VrBillboard::kHorizontalAxes;
++    default:
++      return VrBillboard::kNone;
++  }
++}
++
+ void Shader::AnalyzeUcode(string::StringBuffer& ucode_disasm_buffer) {
+   if (is_ucode_analyzed_) {
+     return;
+@@ -185,6 +203,9 @@ void Shader::AnalyzeUcode(string::StringBuffer& ucode_disasm_buffer) {
+   }
+   ucode_disassembly_ = ucode_disasm_buffer.to_string();
+ 
++  if (VrBillboardShader(type(), ucode_data_hash()) != VrBillboard::kNone) {  // VR fork: the world, the camera (c15)
++    constant_register_map_.float_bitmap[0] |= UINT64_C(0b1000000000001111);
++  }
+   if (constant_register_map_.float_dynamic_addressing) {
+     // All potentially can be referenced.
+     constant_register_map_.float_count = 256;
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
 index 76f5600..80fedc1 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
@@ -2163,7 +2377,7 @@ index 3027dc8..effc151 100644
        }
      }
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 53dcb7f..51a2265 100644
+index 53dcb7f..7b2f1e0 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -12,6 +12,12 @@
@@ -3154,7 +3368,7 @@ index 53dcb7f..51a2265 100644
    bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
    if (memexport_used_vertex) {
      if (!device_properties.vertexPipelineStoresAndAtomics) {
-@@ -3696,6 +4514,260 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3696,6 +4514,265 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        return true;
      }
    }
@@ -3257,14 +3471,19 @@ index 53dcb7f..51a2265 100644
 +      const float back_level = std::sqrt(back[0] * back[0] + back[2] * back[2]);
 +      if (k > 0.f && right_level > 1e-3f && back_level > 1e-3f) {
 +        // c209 = k x (-forward.y) x the level forward = k x back.y x (-level back).
-+        const float values[4] = {k * right[0] / right_level,  k * right[2] / right_level,
-+                                 -k * back[1] * back[0] / back_level, -k * back[1] * back[2] / back_level};
-+        const uint32_t registers[4] = {XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 208,
++        // vr_foliage (the game's VR page, TREE CARDS): "fixed" keeps the game camera's axes written here; anything
++        // else asks the shader (c208.w = 1, unused by the game) to face each card to the camera's position instead.
++        const bool facing = rex::cvar::GetFlagByName("vr_foliage") != "fixed";
++        const float values[5] = {k * right[0] / right_level,  k * right[2] / right_level,
++                                 -k * back[1] * back[0] / back_level, -k * back[1] * back[2] / back_level,
++                                 facing ? 1.f : 0.f};
++        const uint32_t registers[5] = {XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 208,
 +                                       XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 208 + 2,
 +                                       XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 209,
-+                                       XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 209 + 2};
++                                       XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 209 + 2,
++                                       XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 208 + 3};
 +        vr_foliage_patch.processor = this;
-+        for (int i = 0; i < 4; ++i) {
++        for (int i = 0; i < 5; ++i) {
 +          vr_foliage_patch.registers[vr_foliage_patch.count] = registers[i];
 +          vr_foliage_patch.values[vr_foliage_patch.count++] = regs[registers[i]];
 +          uint32_t bits;
@@ -3415,7 +3634,7 @@ index 53dcb7f..51a2265 100644
    bool memexport_used_pixel = pixel_shader && (pixel_shader->memexport_eM_written() != 0);
    if (memexport_used_pixel) {
      if (!device_properties.fragmentStoresAndAtomics) {
-@@ -3707,6 +4779,22 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3707,6 +4784,22 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
    }
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
@@ -3438,7 +3657,7 @@ index 53dcb7f..51a2265 100644
  
    uint32_t ps_param_gen_pos = UINT32_MAX;
    uint32_t interpolator_mask =
-@@ -3864,6 +4952,86 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3864,6 +4957,86 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
    texture_cache_->RequestTextures(used_texture_mask);
  
@@ -3525,7 +3744,7 @@ index 53dcb7f..51a2265 100644
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
-@@ -4135,12 +5303,121 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4135,12 +5308,121 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
    }
  
@@ -3647,7 +3866,7 @@ index 53dcb7f..51a2265 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4195,8 +5472,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4195,8 +5477,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->RangeWrittenByGpu(0, SharedMemory::kBufferSize);
    }
  
@@ -3658,7 +3877,7 @@ index 53dcb7f..51a2265 100644
      uint32_t memexport_total_size = 0;
      for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
        memexport_total_size += memexport_range.size_bytes;
-@@ -4419,11 +5696,92 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4419,11 +5701,92 @@ bool VulkanCommandProcessor::IssueCopy() {
      return false;
    }
  
@@ -3753,7 +3972,7 @@ index 53dcb7f..51a2265 100644
    }
  
    return IssueCopy_ReadbackResolvePath();
-@@ -4848,8 +6206,11 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
+@@ -4848,8 +6211,11 @@ bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out
  void VulkanCommandProcessor::DisableHostOcclusionQueries() {
    if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
      if (BeginSubmission(true)) {
@@ -3765,7 +3984,7 @@ index 53dcb7f..51a2265 100644
        EndSubmission(false);
      }
    }
-@@ -4993,6 +6354,16 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4993,6 +6359,16 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
  
    size_t fences_total = submissions_in_flight_fences_.size();
    size_t fences_awaited = 0;
@@ -3782,7 +4001,7 @@ index 53dcb7f..51a2265 100644
    if (await_submission > submission_completed_) {
      // Await in a blocking way if requested.
      // TODO(Triang3l): Await only one fence. "Fence signal operations that are
-@@ -5000,9 +6371,24 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5000,9 +6376,24 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // synchronization scope all commands that occur earlier in submission
      // order."
      const uint64_t wait_start_us = CounterNowMicros();
@@ -3810,7 +4029,7 @@ index 53dcb7f..51a2265 100644
      g_submission_counters[2].fetch_add(1, std::memory_order_relaxed);
      g_submission_counters[3].fetch_add(CounterNowMicros() - wait_start_us,
                                         std::memory_order_relaxed);
-@@ -5257,6 +6643,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5257,6 +6648,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      primitive_processor_->BeginFrame();
  
      texture_cache_->BeginFrame();
@@ -3818,7 +4037,7 @@ index 53dcb7f..51a2265 100644
    }
  
    return true;
-@@ -5341,6 +6728,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5341,6 +6733,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -3826,7 +4045,7 @@ index 53dcb7f..51a2265 100644
      EndRenderPass();
  
      pipeline_cache_->EndSubmission();
-@@ -5363,8 +6751,13 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5363,8 +6756,13 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
              sparse_buffer_bind_infos_temp_.emplace_back();
          sparse_buffer_bind_info.buffer = sparse_buffer_bind.buffer;
          sparse_buffer_bind_info.bindCount = sparse_buffer_bind.bind_count;
@@ -3841,7 +4060,7 @@ index 53dcb7f..51a2265 100644
        }
        assert_false(semaphores_free_.empty());
        VkSemaphore bind_sparse_semaphore = semaphores_free_.back();
-@@ -5405,6 +6798,47 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5405,6 +6803,47 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
  
      assert_false(command_buffers_writable_.empty());
      CommandBuffer command_buffer = command_buffers_writable_.back();
@@ -3889,7 +4108,7 @@ index 53dcb7f..51a2265 100644
      if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to reset a Vulkan command pool");
        return false;
-@@ -5418,6 +6852,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5418,6 +6857,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -3897,7 +4116,7 @@ index 53dcb7f..51a2265 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5456,6 +6891,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5456,6 +6896,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        g_submission_counters[1].fetch_add(CounterNowMicros() - submit_start_us,
                                           std::memory_order_relaxed);
      }
@@ -3908,7 +4127,7 @@ index 53dcb7f..51a2265 100644
      if (submit_result != VK_SUCCESS) {
        REXGPU_ERROR("Failed to submit a Vulkan command buffer");
        if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
-@@ -5479,6 +6918,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5479,6 +6923,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      fences_free_.pop_back();
  
      submission_open_ = false;
@@ -3916,7 +4135,7 @@ index 53dcb7f..51a2265 100644
    }
  
    if (is_closing_frame) {
-@@ -5489,6 +6929,19 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5489,6 +6934,19 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      // Submission already closed now, so minus 1.
      closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] = GetCurrentSubmission() - 1;
  
@@ -3936,7 +4155,7 @@ index 53dcb7f..51a2265 100644
      if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
        cache_clear_requested_ = false;
  
-@@ -5532,6 +6985,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+@@ -5532,6 +6990,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
  
    constants_transient_descriptors_free_.clear();
    constants_transient_descriptors_used_.clear();
@@ -3945,7 +4164,7 @@ index 53dcb7f..51a2265 100644
    for (std::vector<VkDescriptorSet>& transient_descriptors_free :
         single_transient_descriptors_free_) {
      transient_descriptors_free.clear();
-@@ -6480,6 +7935,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6480,6 +7940,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferCount) - 1;
    assert_zero(current_constant_buffers_up_to_date_ & ~kAllConstantBuffersMask);
    if ((current_constant_buffers_up_to_date_ & kAllConstantBuffersMask) != kAllConstantBuffersMask) {
@@ -3953,7 +4172,7 @@ index 53dcb7f..51a2265 100644
      current_graphics_descriptor_set_values_up_to_date_ &=
          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
      size_t uniform_buffer_alignment =
-@@ -6512,23 +7968,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6512,23 +7973,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        // dummy buffer.
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_vertex, UINT32_C(1));
@@ -3991,7 +4210,7 @@ index 53dcb7f..51a2265 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6541,23 +8000,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6541,23 +8005,26 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
            current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFloatPixel];
        size_t float_constants_size =
            sizeof(float) * 4 * std::max(float_constant_count_pixel, UINT32_C(1));
@@ -4029,7 +4248,7 @@ index 53dcb7f..51a2265 100644
          }
        }
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
-@@ -6597,6 +8059,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6597,6 +8064,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                                << SpirvShaderTranslator::kConstantBufferFetch;
      }
@@ -4039,7 +4258,7 @@ index 53dcb7f..51a2265 100644
    }
  
    // Textures and samplers.
-@@ -6640,6 +8105,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6640,6 +8110,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        (texture_count_pixel || sampler_count_pixel) &&
        !(current_graphics_descriptor_set_values_up_to_date_ &
          (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
@@ -4052,7 +4271,7 @@ index 53dcb7f..51a2265 100644
    descriptor_write_image_info_.clear();
    descriptor_write_image_info_.reserve(
        (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-@@ -6656,6 +8127,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6656,6 +8132,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -4064,7 +4283,7 @@ index 53dcb7f..51a2265 100644
    size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_vertex_textures && sampler_count_vertex) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6676,6 +8152,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6676,6 +8157,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                                : VK_IMAGE_LAYOUT_UNDEFINED;
      }
    }
@@ -4088,7 +4307,7 @@ index 53dcb7f..51a2265 100644
    size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
    if (write_pixel_textures && sampler_count_pixel) {
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-@@ -6707,8 +8200,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6707,8 +8205,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        VkDescriptorPoolSize constants_descriptor_count;
        constants_descriptor_count.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
        constants_descriptor_count.descriptorCount = SpirvShaderTranslator::kConstantBufferCount;
@@ -4103,7 +4322,7 @@ index 53dcb7f..51a2265 100644
        if (constants_descriptor_set == VK_NULL_HANDLE) {
          return false;
        }
-@@ -6724,7 +8221,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6724,7 +8226,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
        write_constants.dstBinding = i;
        write_constants.dstArrayElement = 0;
        write_constants.descriptorCount = 1;
@@ -4113,7 +4332,7 @@ index 53dcb7f..51a2265 100644
        write_constants.pImageInfo = nullptr;
        write_constants.pBufferInfo = &current_constant_buffer_infos_[i];
        write_constants.pTexelBufferView = nullptr;
-@@ -6732,6 +8230,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6732,6 +8235,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
          constants_descriptor_set;
@@ -4126,7 +4345,7 @@ index 53dcb7f..51a2265 100644
    }
    // Vertex shader textures and samplers.
    if (write_vertex_textures) {
-@@ -6751,13 +8255,25 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6751,13 +8260,25 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
          write_textures[0].dstSet;
    }
    // Pixel shader textures and samplers.
@@ -4154,7 +4373,7 @@ index 53dcb7f..51a2265 100644
          descriptor_write_image_info_.data() + pixel_sampler_image_info_offset, write_textures);
      if (!texture_descriptor_set_write_count) {
        return false;
-@@ -6781,7 +8297,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6781,7 +8302,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    if (!texture_count_vertex && !sampler_count_vertex) {
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
    }
@@ -4164,7 +4383,7 @@ index 53dcb7f..51a2265 100644
      descriptor_sets_needed &= ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
    }
    uint32_t descriptor_sets_remaining =
-@@ -6790,21 +8307,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6790,21 +8312,54 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    while (rex::bit_scan_forward(descriptor_sets_remaining, &descriptor_set_index)) {
      uint32_t descriptor_set_mask_tzcnt =
          rex::tzcnt(~(descriptor_sets_remaining | ((UINT32_C(1) << descriptor_set_index) - 1)));
@@ -4220,7 +4439,7 @@ index 53dcb7f..51a2265 100644
  uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
      bool is_vertex, uint32_t texture_count, uint32_t sampler_count,
      VkDescriptorSetLayout descriptor_set_layout, const VkDescriptorImageInfo* texture_image_info,
-@@ -6814,6 +8364,8 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6814,6 +8369,8 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
    if (!texture_count && !sampler_count) {
      return 0;
    }
@@ -4229,7 +4448,7 @@ index 53dcb7f..51a2265 100644
    TextureDescriptorSetLayoutKey texture_descriptor_set_layout_key;
    texture_descriptor_set_layout_key.texture_count = texture_count;
    texture_descriptor_set_layout_key.sampler_count = sampler_count;
-@@ -6832,7 +8384,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6832,7 +8389,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
        VkDescriptorPoolSize& texture_descriptor_count =
            texture_descriptor_counts[texture_descriptor_counts_count++];
        texture_descriptor_count.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -4238,7 +4457,7 @@ index 53dcb7f..51a2265 100644
      }
      if (sampler_count) {
        VkDescriptorPoolSize& texture_descriptor_count =
-@@ -6861,7 +8413,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+@@ -6861,7 +8418,7 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
      descriptor_set_write.dstSet = texture_descriptor_set;
      descriptor_set_write.dstBinding = 0;
      descriptor_set_write.dstArrayElement = 0;

@@ -461,6 +461,8 @@ constexpr const char* kPromptValues[] = {"auto", "xbox", "playstation"};
 constexpr const char* kPromptLabels[] = {"AUTO", "XBOX", "PLAYSTATION"};
 constexpr const char* kCarWindowValues[] = {"game", "light", "clear"};
 constexpr const char* kCarWindowLabels[] = {"GAME", "LIGHT", "CLEAR"};
+constexpr const char* kVrFoliageValues[] = {"facing", "fixed"};
+constexpr const char* kVrFoliageLabels[] = {"FACE YOU", "FIXED"};
 constexpr const char* kIntroValues[] = {"normal", "fast", "skip"};
 constexpr const char* kIntroLabels[] = {"NORMAL", "FAST", "SKIP (NO LOGO)"};
 
@@ -584,6 +586,8 @@ ItemDef kVrItems[] = {
     {"PM_MxVrDlssModel", ItemKind::kStringChoice, "vr_dlss_model", "DLSS MODEL", kVrDlssModelValues,
      kVrDlssModelLabels, nullptr, 7},
     {"PM_MxVrCockpitSway", ItemKind::kToggle, "vr_cockpit_sway", "COCKPIT SWAY"},
+    {"PM_MxVrFoliage", ItemKind::kStringChoice, "vr_foliage", "TREE CARDS", kVrFoliageValues, kVrFoliageLabels,
+     nullptr, 2},
     {"PM_MxVrFrameCap", ItemKind::kStringChoice, "vr_frame_cap", "FRAME RATE CAP", kVrFrameCapValues,
      kVrFrameCapLabels, nullptr, 3},
     {"PM_MxVrRestart", ItemKind::kAction, nullptr, "RESTART GAME"},
