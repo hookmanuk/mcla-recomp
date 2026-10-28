@@ -8281,10 +8281,10 @@ index 0000000..4b721f7
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..670e0f3
+index 0000000..eadc47e
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1976 @@
+@@ -0,0 +1,1977 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -9513,32 +9513,6 @@ index 0000000..670e0f3
 +  g.vk.vkWaitSemaphores(g.device, &info, uint64_t(left.count()));
 +}
 +
-+// Sleeps for `duration` with a high-resolution waitable timer and a short spin (a plain sleep rounds up to 15.6 ms
-+// when Windows ignores the process's timer resolution).
-+void SleepPrecise(std::chrono::nanoseconds duration) {
-+  const auto until = std::chrono::steady_clock::now() + duration;
-+  constexpr auto kSpin = std::chrono::microseconds(500);
-+  if (duration > kSpin + std::chrono::microseconds(200)) {
-+#ifdef _WIN32
-+    thread_local HANDLE timer =
-+        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-+    if (timer) {
-+      LARGE_INTEGER due;
-+      due.QuadPart = -int64_t((duration - kSpin).count() / 100);
-+      if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
-+        WaitForSingleObject(timer, INFINITE);
-+      }
-+    } else {
-+      std::this_thread::sleep_for(duration - kSpin);
-+    }
-+#else
-+    std::this_thread::sleep_for(duration - kSpin);
-+#endif
-+  }
-+  while (std::chrono::steady_clock::now() < until) {
-+  }
-+}
-+
 +void FrameLoop() {
 +  while (!g.quit) {
 +    PollEvents();
@@ -9546,12 +9520,24 @@ index 0000000..670e0f3
 +      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 +      continue;
 +    }
++    static const bool trace = std::getenv("MCLA_VR_LOOP_TRACE") != nullptr;  // development: the loop's stages
++    static uint32_t trace_n = 0;
++    auto trace_t = std::chrono::steady_clock::now();
++    XrTime trace_first_time = 0;
++    double trace_ms[6] = {};
++    auto stage = [&](int i) {
++      const auto now = std::chrono::steady_clock::now();
++      trace_ms[i] = std::chrono::duration<double, std::milli>(now - trace_t).count();
++      trace_t = now;
++    };
 +    g.frame_state = {XR_TYPE_FRAME_STATE};
 +    XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
 +    if (!Check(g.xr.WaitFrame(g.session, &wait, &g.frame_state), "xrWaitFrame")) {
 +      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 +      continue;
 +    }
++    trace_first_time = g.frame_state.predictedDisplayTime;
++    stage(0);
 +    if (g.frame_state.predictedDisplayPeriod > 0) {
 +      const uint64_t period = uint64_t(g.frame_state.predictedDisplayPeriod);
 +      g.display_period_ns.store(period, std::memory_order_relaxed);
@@ -9580,33 +9566,39 @@ index 0000000..670e0f3
 +      g.flip_token.store(true, std::memory_order_relaxed);  // one game frame per headset frame (while capped)
 +    }
 +    g.token_cv.notify_all();
-+    // The frame cap (vr_frame_cap N): this loop submits every Nth headset frame; the N - 1 between are left to the
-+    // runtime (an external frame generator fills them). Skipped frames are waited out with xrWaitFrame alone, which
-+    // blocks a period each on a real runtime (SteamVR): a sleep as well made each skipped frame two periods, and the
-+    // game, waiting for the loop's token, stalled to 10 FPS (Matt, 72 Hz cap 2). A runtime that returns at once
-+    // (the simulator) advances predictedDisplayTime a period per call too, so the wait is by display time: until the
-+    // frame N - 1 periods on, sleeping the remainder only when a call came back early. The wait is here, before the
-+    // token and the head pose, so the game frame released below is drawn for the frame it is shown in.
-+    {
-+      const uint64_t period = cap_period;
-+      if (cap > 1 && period) {
-+        const XrTime target = shown_time;
-+        for (int calls = 0; calls < 2 * cap && g.frame_state.predictedDisplayTime < target - XrTime(period / 2); ++calls) {
-+          const XrTime before = g.frame_state.predictedDisplayTime;
-+          const auto t0 = std::chrono::steady_clock::now();
-+          if (!Check(g.xr.WaitFrame(g.session, &wait, &g.frame_state), "xrWaitFrame")) {
++    stage(1);
++    // The frame cap (vr_frame_cap N): this loop renders every Nth headset frame; the N - 1 between are skipped by
++    // waiting, beginning and ending them with no layers (the runtime, or an external frame generator, fills them).
++    // Each skipped frame must get its xrBeginFrame: OpenXR forbids a second xrWaitFrame before the previous frame
++    // is begun, and SteamVR enforces it by blocking that call for good (the simulator does not): every attempt to
++    // skip with xrWaitFrame alone, with or without sleeps, left this thread stuck after its first frame at cap 2
++    // and 3 (the game then at 10 / 6.6 FPS on its token timeouts, "Waiting..." in SteamVR).
++    if (cap > 1 && g.running) {
++      for (int skipped = 1; skipped < cap && !g.quit; ++skipped) {
++        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
++        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
++        end.displayTime = g.frame_state.predictedDisplayTime;
++        end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
++        end.layerCount = 0;
++        {
++          QueueLock lock;
++          if (!Check(g.xr.BeginFrame(g.session, &begin), "xrBeginFrame (skipped)") ||
++              !Check(g.xr.EndFrame(g.session, &end), "xrEndFrame (skipped)")) {
 +            break;
 +          }
-+          const auto waited = std::chrono::steady_clock::now() - t0;
-+          if (g.frame_state.predictedDisplayTime <= before) {  // no new frame handed out: wait a period ourselves
-+            SleepPrecise(std::chrono::nanoseconds(period) - std::min<std::chrono::nanoseconds>(waited, std::chrono::nanoseconds(period)));
-+          } else if (waited < std::chrono::nanoseconds(period / 4)) {  // handed out at once: hold until its time
-+            SleepPrecise(std::chrono::nanoseconds(period) - waited);
-+          }
++        }
++        PollEvents();
++        if (!g.running || !Check(g.xr.WaitFrame(g.session, &wait, &g.frame_state), "xrWaitFrame (skipped)")) {
++          break;
++        }
++        if (g.frame_state.predictedDisplayPeriod > 0) {
++          g.display_period_ns.store(uint64_t(g.frame_state.predictedDisplayPeriod), std::memory_order_relaxed);
 +        }
 +      }
 +    }
++    stage(2);
 +    WaitForGameFrame();
++    stage(3);
 +    std::scoped_lock frame_lock{g.frame_mutex};
 +    {
 +      QueueLock lock;
@@ -9633,7 +9625,16 @@ index 0000000..670e0f3
 +      }
 +    }
 +    g.repeats += !shown;
++    stage(4);
 +    EndFrame();
++    stage(5);
++    if (trace && ++trace_n % 90 == 0) {
++      Log("loop trace: xrWaitFrame %.1f ms, head+token %.1f, skip-wait %.1f (display time %+.1f ms), game wait %.1f, "
++          "show %.1f, xrEndFrame %.1f; shown %d, period %.2f ms",
++          trace_ms[0], trace_ms[1], trace_ms[2],
++          double(g.frame_state.predictedDisplayTime - trace_first_time) * 1e-6, trace_ms[3], trace_ms[4], trace_ms[5],
++          int(shown), double(g.display_period_ns.load(std::memory_order_relaxed)) * 1e-6);
++    }
 +    NoteFrameTime();
 +  }
 +}
