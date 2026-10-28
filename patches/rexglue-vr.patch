@@ -2137,6 +2137,21 @@ index 47926fb..4997ce1 100644
      if (uint32_t(now_ms - page_heat_decay_ms_) >= 1000) {
        page_heat_decay_ms_ = now_ms;
        for (uint8_t& heat : page_heat_) {
+diff --git a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+index 3027dc8..effc151 100644
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -293,7 +293,9 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+           }
+         }
+       }
+-      if (estimate_vertex_max_y) {
++      // VR fork: only D3D's clear quad (its vertex shader): MCLA with shadows off draws many other small unclipped
++      // draws with the 8192 scissor, and running the shader on the CPU for each cost a third of its frame rate.
++      if (estimate_vertex_max_y && vertex_shader.ucode_data_hash() == 0x1E6883FCCDE1F688ull) {
+         max_y = std::min(max_y, EstimateVertexMaxY(vertex_shader));
+       }
+     }
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
 index 53dcb7f..0840a6b 100644
 --- a/src/graphics/vulkan/command_processor.cpp
@@ -7700,10 +7715,10 @@ index 0000000..baf710c
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..768eaf4
+index 0000000..09af76c
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1798 @@
+@@ -0,0 +1,1821 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -7943,6 +7958,9 @@ index 0000000..768eaf4
 +  // than the eyes' field of view, so the runtime has picture to turn into before the next frame (else a head turn
 +  // shows the frame's edge: the map transition "cropped on one side"). MCLA_VR_OVERSCAN sets the factor (1: none).
 +  std::atomic<bool> slow_frames{false};
++  // BeginFrame: unposed frames since the last posed one, and whether the last frame shown was posed.
++  uint32_t unposed_run = 0;
++  bool last_shown_posed = false;
 +  std::atomic<bool> flip_token{false};
 +  std::mutex token_mutex;
 +  std::condition_variable token_cv;
@@ -9132,7 +9150,13 @@ index 0000000..768eaf4
 +    // 2026-10-26: "the HUD still flickers").
 +    std::scoped_lock lock{g.pose_mutex};
 +    if (!g.swap_poses.empty() && !g.swap_poses.front().posed) {
-+      return -1;
++      // A frame the render thread draws again without a game update (MCLA with shadows off renders faster than it
++      // updates: every other swap had no camera hook) is still drawn with the head-tracked camera: its scene started
++      // with the camera's pose (SceneDrawStarted), so it splits as any other.
++      std::scoped_lock camera_lock{g.camera_mutex};
++      if (!g.drawn_posed) {
++        return -1;
++      }
 +    }
 +  }
 +  uint32_t out_width = width, out_height = height;
@@ -9156,6 +9180,17 @@ index 0000000..768eaf4
 +      !MakeScreens(out_width * (Stereo() ? 2 : 1), out_height, width, height)) {
 +    g.split_screen = -1;
 +    return -1;
++  }
++  // A 2D frame right after head-tracked ones is left off the headset (it keeps the last posed frame): MCLA with
++  // shadows off presents every other frame from a copy of the last scene without drawing one, and showing those on
++  // the screen flickered between the world and the screen. A real 2D screen (a menu) shows from its third frame.
++  {
++    const bool posed = g.gpu_pose.posed && g.frame_has_scene;
++    g.unposed_run = posed ? 0 : g.unposed_run + 1;
++    if (!posed && g.last_shown_posed && g.unposed_run <= 2 && g.split_screen < 0) {
++      return -1;
++    }
++    g.last_shown_posed = posed;
 +  }
 +  const bool split = g.split_screen >= 0;
 +  const uint32_t index = split ? uint32_t(g.split_screen) : g.screen_next;
@@ -9480,7 +9515,10 @@ index 0000000..768eaf4
 +      return !(v && v[0] == '0');
 +    }();
 +    std::scoped_lock camera_lock{g.camera_mutex};
-+    if (from_gpu && g.drawn_posed && g.gpu_pose.posed) {
++    if (from_gpu && g.drawn_posed) {
++      // Posed too when the swap had no camera hook but its scene was drawn head-tracked (a frame drawn again
++      // without a game update, SplitFrame).
++      g.gpu_pose.posed = true;
 +      std::memcpy(g.gpu_pose.pose, g.drawn_pose, sizeof(g.gpu_pose.pose));
 +      std::memcpy(g.gpu_pose.tangents, g.drawn_tangents, sizeof(g.gpu_pose.tangents));
 +    }
