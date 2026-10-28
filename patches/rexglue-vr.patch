@@ -49,8 +49,29 @@ index 3bbd52e..30a2c7f 100644
  
    // Render targets actually used by the draw call with the last successful
    // update. 0 is depth, color starting from 1, nullptr if not bound.
+diff --git a/include/rex/graphics/pipeline/shader/shader.h b/include/rex/graphics/pipeline/shader/shader.h
+index 4cf3854..3b2649c 100644
+--- a/include/rex/graphics/pipeline/shader/shader.h
++++ b/include/rex/graphics/pipeline/shader/shader.h
+@@ -630,6 +630,16 @@ void ParseTextureFetchInstruction(const ucode::TextureFetchInstruction& op,
+ void ParseAluInstruction(const ucode::AluInstruction& op, xenos::ShaderType shader_type,
+                          ParsedAluInstruction& instr);
+ 
++// VR fork: vertex shaders of camera-facing cards. In VR the camera carries the head's turn, so every card turned with
++// the head; the SPIR-V translator faces each card to the camera's position (c15) from its own anchor (the first
++// vfetch_full of 3 floats) instead. MCLA_VR_BILLBOARD=0: as the game draws them.
++enum class VrBillboard {
++  kNone,
++  kCameraAxes,      // MCLA's distant tree impostors: corner = centre + a * c12 + b * c13 (the camera's right, up)
++  kHorizontalAxes,  // MCLA's bushes: spread along c208 (the camera's right) and c209 (its up), both made level
++};
++VrBillboard VrBillboardShader(xenos::ShaderType type, uint64_t ucode_data_hash);
++
+ class Shader {
+  public:
+   // Type of the vertex shader on the host - shader interface depends on in, so
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index 4eb6935..365d622 100644
+index 4eb6935..ab6f50b 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
 @@ -897,6 +897,21 @@ class SpirvShaderTranslator : public ShaderTranslator {
@@ -75,6 +96,18 @@ index 4eb6935..365d622 100644
    spv::Id uniform_float_constants_;
    spv::Id uniform_bool_loop_constants_;
    spv::Id uniform_fetch_constants_;
+@@ -983,6 +998,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   // `base + index * stride` in dwords from the last vfetch_full as it may be
+   // needed by vfetch_mini - int.
+   spv::Id var_main_vfetch_address_;
++  // VR fork (VrBillboardShader): the card's centre (float3, the first vfetch_full of 3 floats at offset 0).
++  VrBillboard vr_billboard_ = VrBillboard::kNone;
++  bool vr_billboard_centre_stored_ = false;
++  spv::Id var_main_vr_billboard_centre_ = spv::NoResult;
++  spv::Id VrBillboardAxis(uint32_t constant);
+   // float.
+   spv::Id var_main_tfetch_lod_;
+   // float3.
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
 index d26cd4f..6041fdc 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
@@ -1383,10 +1416,18 @@ index 953c5fd..0e3ac7b 100644
    if (are_accumulated_render_targets_valid_) {
      // Check if the only re-enabling a previously bound render target.
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..0eb5b15 100644
+index 1774f97..06c16fb 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
-@@ -20,6 +20,7 @@
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdlib>
+ #include <memory>
+ #include <string>
+ #include <utility>
+@@ -20,6 +21,7 @@
  #include <SPIRV/GLSL.std.450.h>
  #include <fmt/format.h>
  
@@ -1394,7 +1435,7 @@ index 1774f97..0eb5b15 100644
  #include <rex/assert.h>
  #include <rex/graphics/pipeline/shader/spirv.h>
  #include <rex/graphics/pipeline/shader/spirv_translator.h>
-@@ -136,6 +137,11 @@ void SpirvShaderTranslator::Reset() {
+@@ -136,6 +138,11 @@ void SpirvShaderTranslator::Reset() {
    texture_bindings_.clear();
  
    main_interface_.clear();
@@ -1406,7 +1447,21 @@ index 1774f97..0eb5b15 100644
    var_main_registers_ = spv::NoResult;
    var_main_memexport_address_ = spv::NoResult;
    for (size_t memexport_eM_index = 0; memexport_eM_index < rex::countof(var_main_memexport_data_);
-@@ -1635,7 +1641,80 @@ void SpirvShaderTranslator::EnsureBuildPointAvailable() {
+@@ -499,6 +506,13 @@ void SpirvShaderTranslator::StartTranslation() {
+     var_main_vfetch_address_ =
+         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_int_,
+                                  "xe_var_vfetch_address", const_int_0_);
++    vr_billboard_ = VrBillboardShader(current_shader().type(), current_shader().ucode_data_hash());
++    vr_billboard_centre_stored_ = false;
++    if (vr_billboard_ != VrBillboard::kNone) {  // VR fork
++      var_main_vr_billboard_centre_ =
++          builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_float3_,
++                                   "xe_var_vr_billboard_centre", const_float3_0_);
++    }
+     var_main_tfetch_lod_ =
+         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_float_,
+                                  "xe_var_tfetch_lod", const_float_0_);
+@@ -1635,7 +1649,80 @@ void SpirvShaderTranslator::EnsureBuildPointAvailable() {
    builder_->setBuildPoint(&new_block);
  }
  
@@ -1487,7 +1542,7 @@ index 1774f97..0eb5b15 100644
    if (IsSpirvComputeShader()) {
      // For memexport fallback execution, each invocation corresponds to one
      // guest vertex processing index.
-@@ -2509,6 +2588,36 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
+@@ -2509,6 +2596,36 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
      }
    }
  
@@ -1524,7 +1579,7 @@ index 1774f97..0eb5b15 100644
    uint32_t clip_distance_next_component = 0;
    uint32_t cull_distance_next_component = 0;
    // Clip against user clip planes.
-@@ -2817,6 +2926,27 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
+@@ -2817,6 +2934,27 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
  }
  
  void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
@@ -1552,7 +1607,7 @@ index 1774f97..0eb5b15 100644
    Modification shader_modification = GetSpirvShaderModification();
  
    if (edram_fragment_shader_interlock_) {
-@@ -2908,6 +3038,14 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
+@@ -2908,6 +3046,14 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
                              spv::BuiltInFragCoord);
      main_interface_.push_back(input_fragment_coordinates_);
    }
@@ -1567,11 +1622,147 @@ index 1774f97..0eb5b15 100644
  
    // Is front facing.
    if (edram_fragment_shader_interlock_ ||
+@@ -3496,7 +3642,105 @@ spv::Id SpirvShaderTranslator::GetStorageAddressingIndex(
+   return index;
+ }
+ 
++// VR fork: a camera-facing card's axis, facing the camera's position (c15) from the card's anchor (in the world: through
++// c0-c3): the same at any head turn. kCameraAxes: right (c12) or up (c13), upright to the world's up (+y).
++// kHorizontalAxes: c208 (the camera's right, level) and c209 (its up, level) of a camera looking at the anchor. Seen
++// from steeply above or below (the minimap's camera, 7 km up) the game's own axes.
++spv::Id SpirvShaderTranslator::VrBillboardAxis(uint32_t constant) {
++  const Shader::ConstantRegisterMap& map = current_shader().constant_register_map();
++  auto load_constant = [&](uint32_t index) {
++    id_vector_temp_util_.clear();
++    id_vector_temp_util_.push_back(const_int_0_);
++    id_vector_temp_util_.push_back(builder_->makeIntConstant(int(map.GetPackedFloatConstantIndex(index))));
++    return builder_->createLoad(
++        builder_->createAccessChain(spv::StorageClassUniform, uniform_float_constants_, id_vector_temp_util_),
++        spv::NoPrecision);
++  };
++  auto component = [&](spv::Id vector, unsigned int i) {
++    return builder_->createCompositeExtract(vector, type_float_, i);
++  };
++  auto binary = [&](spv::Op op, spv::Id a, spv::Id b) { return builder_->createBinOp(op, type_float_, a, b); };
++  const spv::Id original = load_constant(constant);
++  uint_vector_temp_util_.assign({0, 1, 2});
++  const spv::Id camera =
++      builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_, load_constant(15), uint_vector_temp_util_);
++  spv::Id centre = builder_->createLoad(var_main_vr_billboard_centre_, spv::NoPrecision);
++  {
++    spv::Id world = builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_, load_constant(3),
++                                                  uint_vector_temp_util_);
++    for (unsigned int i = 0; i < 3; ++i) {
++      world = builder_->createBinOp(
++          spv::OpFAdd, type_float3_, world,
++          builder_->createBinOp(spv::OpVectorTimesScalar, type_float3_,
++                                builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_, load_constant(i),
++                                                              uint_vector_temp_util_),
++                                component(centre, i)));
++    }
++    centre = world;
++  }
++  // Within ~72 degrees of level (false for NaN: a zero direction).
++  auto level_enough = [&](spv::Id direction) {
++    return builder_->createBinOp(
++        spv::OpFOrdLessThan, type_bool_,
++        builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs, component(direction, 1)),
++        builder_->makeFloatConstant(0.95f));
++  };
++  if (vr_billboard_ == VrBillboard::kHorizontalAxes) {
++    // The game sets c208 = k x the camera's right (level) and c209 = k x its up made level (k sin(pitch) along the
++    // level forward); the same for a camera looking from c15 at the anchor: d its direction, g = d made level:
++    // c208 = k (-g.z, 0, g.x), c209 = k (-d.y) g.
++    const spv::Id d = builder_->createUnaryBuiltinCall(
++        type_float3_, ext_inst_glsl_std_450_, GLSLstd450Normalize,
++        builder_->createBinOp(spv::OpFSub, type_float3_, centre, camera));
++    id_vector_temp_util_.assign({component(d, 0), component(d, 2)});
++    const spv::Id g = builder_->createUnaryBuiltinCall(
++        type_float2_, ext_inst_glsl_std_450_, GLSLstd450Normalize,
++        builder_->createCompositeConstruct(type_float2_, id_vector_temp_util_));
++    const spv::Id across = load_constant(208);
++    uint_vector_temp_util_.assign({0, 2});
++    const spv::Id k = builder_->createUnaryBuiltinCall(
++        type_float_, ext_inst_glsl_std_450_, GLSLstd450Length,
++        builder_->createRvalueSwizzle(spv::NoPrecision, type_float2_, across, uint_vector_temp_util_));
++    spv::Id x, z;
++    if (constant == 208) {
++      x = binary(spv::OpFMul, k, builder_->createUnaryOp(spv::OpFNegate, type_float_, component(g, 1)));
++      z = binary(spv::OpFMul, k, component(g, 0));
++    } else {
++      const spv::Id tilt =
++          binary(spv::OpFMul, k, builder_->createUnaryOp(spv::OpFNegate, type_float_, component(d, 1)));
++      x = binary(spv::OpFMul, tilt, component(g, 0));
++      z = binary(spv::OpFMul, tilt, component(g, 1));
++    }
++    id_vector_temp_util_.assign({x, component(original, 1), z, component(original, 3)});
++    return builder_->createTriOp(spv::OpSelect, type_float4_, level_enough(d),
++                                 builder_->createCompositeConstruct(type_float4_, id_vector_temp_util_), original);
++  }
++  const spv::Id back = builder_->createUnaryBuiltinCall(
++      type_float3_, ext_inst_glsl_std_450_, GLSLstd450Normalize,
++      builder_->createBinOp(spv::OpFSub, type_float3_, camera, centre));
++  id_vector_temp_util_.assign({const_float_0_, builder_->makeFloatConstant(1.f), const_float_0_});
++  const spv::Id world_up = builder_->makeCompositeConstant(type_float3_, id_vector_temp_util_);
++  const spv::Id right = builder_->createUnaryBuiltinCall(
++      type_float3_, ext_inst_glsl_std_450_, GLSLstd450Normalize,
++      builder_->createBinBuiltinCall(type_float3_, ext_inst_glsl_std_450_, GLSLstd450Cross, world_up, back));
++  const spv::Id axis =
++      constant == 12 ? right
++                     : builder_->createBinBuiltinCall(type_float3_, ext_inst_glsl_std_450_, GLSLstd450Cross, back,
++                                                      right);
++  id_vector_temp_util_.assign({component(axis, 0), component(axis, 1), component(axis, 2), component(original, 3)});
++  return builder_->createTriOp(spv::OpSelect, type_float4_, level_enough(back),
++                               builder_->createCompositeConstruct(type_float4_, id_vector_temp_util_), original);
++}
++
+ spv::Id SpirvShaderTranslator::LoadOperandStorage(const InstructionOperand& operand) {
++  if (vr_billboard_ != VrBillboard::kNone && vr_billboard_centre_stored_ &&  // VR fork
++      operand.storage_source == InstructionStorageSource::kConstantFloat &&
++      operand.storage_addressing_mode == InstructionStorageAddressingMode::kAbsolute &&
++      (vr_billboard_ == VrBillboard::kCameraAxes ? operand.storage_index == 12 || operand.storage_index == 13
++                                                 : operand.storage_index == 208 || operand.storage_index == 209)) {
++    EnsureBuildPointAvailable();
++    return VrBillboardAxis(operand.storage_index);
++  }
+   spv::Id index =
+       GetStorageAddressingIndex(operand.storage_addressing_mode, operand.storage_index,
+                                 operand.storage_source == InstructionStorageSource::kConstantFloat);
 diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
-index 9ce3bb4..1a9317c 100644
+index 9ce3bb4..f3f3242 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
-@@ -647,21 +647,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+@@ -93,6 +93,29 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+     }
+     // Store the address for the subsequent vfetch_mini.
+     builder_->createStore(address, var_main_vfetch_address_);
++    // VR fork (VrBillboardShader): the card's centre, the first 3 floats at offset 0.
++    if (vr_billboard_ != VrBillboard::kNone && !vr_billboard_centre_stored_ && !instr.attributes.offset &&
++        instr.attributes.data_format == xenos::VertexFormat::k_32_32_32_FLOAT) {
++      vr_billboard_centre_stored_ = true;
++      spv::Id centre_words[3];
++      for (int i = 0; i < 3; ++i) {
++        centre_words[i] = LoadUint32FromSharedMemory(
++            i ? builder_->createBinOp(spv::OpIAdd, type_int_, address, builder_->makeIntConstant(i)) : address);
++      }
++      id_vector_temp_.assign(centre_words, centre_words + 3);
++      spv::Id centre = builder_->createCompositeConstruct(type_uint3_, id_vector_temp_);
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(const_int_0_);
++      id_vector_temp_.push_back(builder_->makeIntConstant(int((fetch_constant_word_0_index + 1) >> 2)));
++      id_vector_temp_.push_back(builder_->makeIntConstant(int((fetch_constant_word_0_index + 1) & 3)));
++      const spv::Id fetch_constant_word_1 = builder_->createLoad(
++          builder_->createAccessChain(spv::StorageClassUniform, uniform_fetch_constants_, id_vector_temp_),
++          spv::NoPrecision);
++      centre = EndianSwap32Uint(centre, builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, fetch_constant_word_1,
++                                                              builder_->makeUintConstant(0b11)));
++      builder_->createStore(builder_->createUnaryOp(spv::OpBitcast, type_float3_, centre),
++                            var_main_vr_billboard_centre_);
++    }
+   }
+ 
+   if (!needed_words) {
+@@ -647,21 +670,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
        sampler = builder_->createLoad(sampler_bindings_[sampler_index].variable, spv::NoPrecision);
        const TextureBinding& image_2d_array_or_cube_unsigned_binding =
            texture_bindings_[image_2d_array_or_cube_unsigned_index];
@@ -1597,7 +1788,7 @@ index 9ce3bb4..1a9317c 100644
        }
      }
  
-@@ -2068,6 +2065,24 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+@@ -2068,6 +2088,24 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
    StoreResult(instr.result, result_vector);
  }
  
@@ -1622,7 +1813,7 @@ index 9ce3bb4..1a9317c 100644
  size_t SpirvShaderTranslator::FindOrAddTextureBinding(uint32_t fetch_constant,
                                                        xenos::FetchOpDimension dimension,
                                                        bool is_signed) {
-@@ -2109,10 +2124,14 @@ size_t SpirvShaderTranslator::FindOrAddTextureBinding(uint32_t fetch_constant,
+@@ -2109,10 +2147,14 @@ size_t SpirvShaderTranslator::FindOrAddTextureBinding(uint32_t fetch_constant,
        is_array = true;
        dimension_name = "2d";
    }
@@ -1733,6 +1924,55 @@ index 22bb3e9..c72dbe9 100644
    uint32_t color_targets_written = current_shader().writes_color_targets();
  
    if ((color_targets_written & 0b1) && !IsExecutionModeEarlyFragmentTests()) {
+diff --git a/src/graphics/pipeline/shader/translator.cpp b/src/graphics/pipeline/shader/translator.cpp
+index e472251..0708956 100644
+--- a/src/graphics/pipeline/shader/translator.cpp
++++ b/src/graphics/pipeline/shader/translator.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cstdarg>
++#include <cstdlib>
+ #include <cstring>
+ #include <set>
+ #include <string>
+@@ -46,6 +47,26 @@ using namespace ucode;
+ // Lots of naming comes from the disassembly spit out by the XNA GS compiler
+ // and dumps of d3dcompiler and games: https://pastebin.com/i4kAv7bB
+ 
++VrBillboard VrBillboardShader(xenos::ShaderType type, uint64_t ucode_data_hash) {
++  static const bool enabled = [] {
++    const char* v = std::getenv("MCLA_VR_BILLBOARD");
++    return !(v && v[0] == '0');
++  }();
++  if (!enabled || type != xenos::ShaderType::kVertex) {
++    return VrBillboard::kNone;
++  }
++  switch (ucode_data_hash) {
++    case 0xBC7052E867A9F304ull:  // impostors, colour
++    case 0xFA2574DEF5EF01F5ull:  // impostors, depth
++      return VrBillboard::kCameraAxes;
++    case 0x4D181C0D99016B72ull:  // bushes
++    case 0xAD73CDF775982D19ull:  // bushes, depth
++      return VrBillboard::kHorizontalAxes;
++    default:
++      return VrBillboard::kNone;
++  }
++}
++
+ void Shader::AnalyzeUcode(string::StringBuffer& ucode_disasm_buffer) {
+   if (is_ucode_analyzed_) {
+     return;
+@@ -185,6 +206,9 @@ void Shader::AnalyzeUcode(string::StringBuffer& ucode_disasm_buffer) {
+   }
+   ucode_disassembly_ = ucode_disasm_buffer.to_string();
+ 
++  if (VrBillboardShader(type(), ucode_data_hash()) != VrBillboard::kNone) {  // VR fork: the world, the camera (c15)
++    constant_register_map_.float_bitmap[0] |= UINT64_C(0b1000000000001111);
++  }
+   if (constant_register_map_.float_dynamic_addressing) {
+     // All potentially can be referenced.
+     constant_register_map_.float_count = 256;
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
 index 76f5600..80fedc1 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
