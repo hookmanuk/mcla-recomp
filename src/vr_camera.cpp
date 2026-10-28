@@ -59,6 +59,12 @@ struct FramePose {
   float game[16]{}, out[16]{};
 };
 std::mutex g_pose_mutex;
+// The last 16 cameras the hook posed: the game's (in) and posed (out), under g_pose_mutex.
+struct Posed {
+  float in[16], out[16];
+};
+Posed g_posed_history[16]{};
+uint32_t g_posed_history_next = 0;
 FramePose g_frame_poses[2];
 
 // The cockpit camera's sway: the game slides the cockpit camera along the car as it accelerates (~15 cm back) and
@@ -125,6 +131,21 @@ void ProbeCamera(const char* function, uint32_t viewport, uint32_t caller, uint8
     seen.clear();
     window = std::chrono::steady_clock::now();
   }
+}
+
+// The head's axes and position (rows, in the seat's space: x right, y up, z back) taken into the camera m's space.
+void PoseCamera(const float (&pose)[16], const float (&m)[16], float (&out)[16]) {
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      out[r * 4 + c] = pose[r * 4 + 0] * m[0 * 4 + c] + pose[r * 4 + 1] * m[1 * 4 + c] + pose[r * 4 + 2] * m[2 * 4 + c];
+    }
+    out[r * 4 + 3] = m[r * 4 + 3];
+  }
+  const float scale = float(REXCVAR_GET(mcla_vr_world_scale));
+  for (int c = 0; c < 3; ++c) {
+    out[12 + c] = m[12 + c] + scale * (pose[12] * m[0 * 4 + c] + pose[13] * m[1 * 4 + c] + pose[14] * m[2 * 4 + c]);
+  }
+  out[15] = m[15];
 }
 
 uint32_t LoadU32(const uint8_t* p) {
@@ -307,6 +328,48 @@ extern "C" REX_FUNC(sub_8217CE80) {
           break;
         }
       }
+      // While the car moves, the frame's settings of its camera differ and the copy is often an earlier one than the
+      // last (half the copies went unposed driving: buildings culled on and off): any recent posed camera counts.
+      for (uint32_t n = 0; n < 16 && !found; ++n) {
+        const Posed& p = g_posed_history[(g_posed_history_next + 15 - n) % 16];  // newest first
+        found = true;
+        for (int i = 0; i < 16 && found; ++i) {
+          found = (i & 3) == 3 || std::abs(LoadFloat(base + ctx.r4.u32 + 4 * i) - p.in[i]) <= 1e-3f;
+        }
+        if (found) {
+          std::memcpy(out, p.out, sizeof(out));
+        }
+      }
+      // Driving, the copy is an in-between camera (none of the update thread's): posed with the pose of the frame
+      // the viewport holds, and noted so the game reading it back gets the game's.
+      if (!found) {
+        for (const FramePose& f : g_frame_poses) {
+          if (f.viewport == ctx.r3.u32 && f.posed) {
+            float m[16];
+            for (int i = 0; i < 16; ++i) {
+              m[i] = LoadFloat(base + ctx.r4.u32 + 4 * i);
+            }
+            PoseCamera(f.pose, m, out);
+            Posed& p = g_posed_history[g_posed_history_next++ % 16];
+            std::memcpy(p.in, m, sizeof(p.in));
+            std::memcpy(p.out, out, sizeof(p.out));
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    {  // development (mcla_vr_camera_log): render-thread cameras posed / left unposed, every 2 s
+      static uint32_t hits = 0, misses = 0;
+      static auto window = std::chrono::steady_clock::now();
+      ++(found ? hits : misses);
+      if (std::chrono::steady_clock::now() - window > std::chrono::seconds(2)) {
+        if (REXCVAR_GET(mcla_vr_camera_log)) {
+          REXLOG_INFO("camera: render thread's camera posed {}, unposed {}", hits, misses);
+        }
+        hits = misses = 0;
+        window = std::chrono::steady_clock::now();
+      }
     }
     if (found) {
       static uint32_t scratch = 0;
@@ -363,14 +426,9 @@ extern "C" REX_FUNC(sub_8217CE80) {
   // second setting) is turned from the camera it came from, not turned again. Any of the last 16 posed cameras counts:
   // the render thread's viewport holds an older frame's (kRenderCameraCaller), and one not recognised was turned twice
   // (looking up and down then moved the camera up, down and along, settling somewhere else).
-  struct Posed {
-    float in[16], out[16];
-  };
-  static Posed history[16]{};
-  static uint32_t history_next = 0;
   {
     std::scoped_lock lock{g_pose_mutex};
-    for (const Posed& p : history) {
+    for (const Posed& p : g_posed_history) {
       bool same = true;
       for (int i = 0; i < 16 && same; ++i) {  // the axes and position (the w column can be NaN)
         same = (i & 3) == 3 || std::abs(p.out[i] - m[i]) < 1e-3f;
@@ -401,7 +459,7 @@ extern "C" REX_FUNC(sub_8217CE80) {
   out[15] = m[15];
   {
     std::scoped_lock lock{g_pose_mutex};
-    Posed& p = history[history_next++ % 16];
+    Posed& p = g_posed_history[g_posed_history_next++ % 16];
     std::memcpy(p.in, game, sizeof(p.in));
     std::memcpy(p.out, out, sizeof(p.out));
   }
