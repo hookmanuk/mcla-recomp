@@ -29,6 +29,9 @@ In the game
 - Options can be added after the program name, for example a shortcut to
   "Midnight Club LA VR.exe" --vr=false   (plays on the monitor)
   "Midnight Club LA VR.exe" --setup      (runs the first-run setup again, e.g. another image)
+  "Midnight Club LA VR.exe" --reset-settings   (every option back to its default: if a setting
+                                          stops the game starting, e.g. a render size too big
+                                          for the card; the old mcla.toml is kept beside it)
 
 Files
 - bin\        the game built on your PC (mcla.exe) and its libraries

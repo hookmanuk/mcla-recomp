@@ -587,6 +587,7 @@ ItemDef kVrItems[] = {
     {"PM_MxVrFrameCap", ItemKind::kStringChoice, "vr_frame_cap", "FRAME RATE CAP", kVrFrameCapValues,
      kVrFrameCapLabels, nullptr, 3},
     {"PM_MxVrRestart", ItemKind::kAction, nullptr, "RESTART GAME"},
+    {"PM_MxVrReset", ItemKind::kAction, nullptr, "RESET TO DEFAULTS"},
 };
 
 // What a restart applies (RESTART GAME is enabled when either differs from the start): the render size and MSAA (the
@@ -600,10 +601,17 @@ bool RestartNeeded() {
 
 void SaveSettingsIfChanged();
 
+// An action row's state: RESTART GAME once a restart would apply something, RESET TO DEFAULTS always.
+bool ActionEnabled(const ItemDef& item) {
+  return std::strcmp(item.key, "PM_MxVrReset") == 0 || RestartNeeded();
+}
+
 // The settings saved, the same program started again with the same command line, and this one ended at once (the
 // orderly quit hangs with the headset session open).
-void RestartGame() {
-  SaveSettingsIfChanged();
+void RestartGame(bool reset = false) {
+  if (!reset) {
+    SaveSettingsIfChanged();
+  }
 #ifdef _WIN32
   wchar_t path[MAX_PATH];
   if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) {
@@ -611,6 +619,9 @@ void RestartGame() {
     return;
   }
   std::wstring command = GetCommandLineW();
+  if (reset) {  // RESET TO DEFAULTS: the new process puts mcla.toml aside before it reads it (MclaApp)
+    command += L" --reset-settings";
+  }
   STARTUPINFOW startup{sizeof(startup)};
   PROCESS_INFORMATION process{};
   if (!CreateProcessW(path, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process)) {
@@ -872,7 +883,7 @@ bool BuildRows(int menu) {
 
     if (item.kind == ItemKind::kAction) {  // a label row, greyed out until it would do something
       CallGuest(kLabelRowCtorFn, row, name, 0u);
-      Write32(row + kRowEnabled, RestartNeeded() ? 1 : 0);
+      Write32(row + kRowEnabled, ActionEnabled(item) ? 1 : 0);
       rows.row[i] = row;
       rows.last_index[i] = 0;
     } else if (item.kind == ItemKind::kToggle) {
@@ -925,7 +936,7 @@ void SyncRowsFromOptions(int menu) {
     const ItemDef& item = def.items[i];
     const int index = ItemCurrentIndex(item);
     if (item.kind == ItemKind::kAction) {
-      Write32(rows.row[i] + kRowEnabled, RestartNeeded() ? 1 : 0);
+      Write32(rows.row[i] + kRowEnabled, ActionEnabled(item) ? 1 : 0);
     } else if (item.kind == ItemKind::kToggle) {
       rows.last_index[i] = index;
       Write8(rows.row[i] + kRowChecked, uint8_t(index));
@@ -944,7 +955,7 @@ void PollRows(int menu) {
     const ItemDef& item = def.items[i];
     const int count = ItemValueCount(item);
     if (item.kind == ItemKind::kAction) {
-      Write32(rows.row[i] + kRowEnabled, RestartNeeded() ? 1 : 0);
+      Write32(rows.row[i] + kRowEnabled, ActionEnabled(item) ? 1 : 0);
       continue;
     }
     if (item.kind == ItemKind::kToggle) {
@@ -1172,7 +1183,9 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     if (index < uint32_t(def.item_count)) {
       const ItemDef& item = def.items[index];
       if (item.kind == ItemKind::kAction) {
-        if (RestartNeeded()) {
+        if (std::strcmp(item.key, "PM_MxVrReset") == 0) {
+          RestartGame(true);
+        } else if (RestartNeeded()) {
           RestartGame();
         }
         r3.u64 = 1;

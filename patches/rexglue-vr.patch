@@ -8281,10 +8281,10 @@ index 0000000..4b721f7
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..31b3470
+index 0000000..ef0e4fc
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1962 @@
+@@ -0,0 +1,1965 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -9552,27 +9552,30 @@ index 0000000..31b3470
 +      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 +      continue;
 +    }
-+    // The frame cap (vr_frame_cap N): this loop submits every Nth headset frame; the N - 1 in between are left to the
-+    // runtime (an external frame generator fills them). The wait is here, before the token and the head pose, so the
-+    // game frame released below is drawn for the frame it is shown in; xrWaitFrame after this returns at once with
-+    // the next display time.
++    // The frame cap (vr_frame_cap N): this loop submits every Nth headset frame; the N - 1 between are left to the
++    // runtime (an external frame generator fills them). Skipped frames are waited out with xrWaitFrame alone, which
++    // blocks a period each on a real runtime (SteamVR): a sleep as well made each skipped frame two periods, and the
++    // game, waiting for the loop's token, stalled to 10 FPS (Matt, 72 Hz cap 2). A runtime that returns at once
++    // (the simulator) advances predictedDisplayTime a period per call too, so the wait is by display time: until the
++    // frame N - 1 periods on, sleeping the remainder only when a call came back early. The wait is here, before the
++    // token and the head pose, so the game frame released below is drawn for the frame it is shown in.
 +    {
 +      const int cap = std::clamp(REXCVAR_GET(vr_frame_cap), 1, 4);
 +      const uint64_t period = g.display_period_ns.load(std::memory_order_relaxed);
 +      if (cap > 1 && period) {
-+        // Until the display time N - 1 periods after this frame's; one xrWaitFrame per skipped period (a runtime that
-+        // returns the next frame at once, the simulator among them, otherwise hands out a frame too early: cap 3 gave
-+        // 38.7 FPS at 90 Hz, 2.3 periods, not 3).
 +        const XrTime target = g.frame_state.predictedDisplayTime + XrTime(uint64_t(cap - 1) * period);
-+        for (int skipped = 1; skipped < cap; ++skipped) {
-+          SleepPrecise(std::chrono::nanoseconds(period));
++        for (int calls = 0; calls < 2 * cap && g.frame_state.predictedDisplayTime < target - XrTime(period / 2); ++calls) {
++          const XrTime before = g.frame_state.predictedDisplayTime;
++          const auto t0 = std::chrono::steady_clock::now();
 +          if (!Check(g.xr.WaitFrame(g.session, &wait, &g.frame_state), "xrWaitFrame")) {
 +            break;
 +          }
-+        }
-+        if (g.frame_state.predictedDisplayTime < target - XrTime(period / 2)) {
-+          SleepPrecise(std::chrono::nanoseconds(uint64_t(target - g.frame_state.predictedDisplayTime)));
-+          Check(g.xr.WaitFrame(g.session, &wait, &g.frame_state), "xrWaitFrame");
++          const auto waited = std::chrono::steady_clock::now() - t0;
++          if (g.frame_state.predictedDisplayTime <= before) {  // no new frame handed out: wait a period ourselves
++            SleepPrecise(std::chrono::nanoseconds(period) - std::min<std::chrono::nanoseconds>(waited, std::chrono::nanoseconds(period)));
++          } else if (waited < std::chrono::nanoseconds(period / 4)) {  // handed out at once: hold until its time
++            SleepPrecise(std::chrono::nanoseconds(period) - waited);
++          }
 +        }
 +      }
 +    }

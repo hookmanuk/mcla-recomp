@@ -3,6 +3,13 @@
 #include "mcla_app.h"
 
 #include <filesystem>
+#include <string>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
@@ -22,6 +29,26 @@ std::unique_ptr<rex::system::IAudioSystem> CreateMclaAudioSystem(
 // run: find the extracted game next to the executable or, as the build leaves
 // it, in the repository a few folders up, and load the Xenos GPU plugin.
 void MclaApp::OnConfigurePaths(rex::PathConfig& paths) {
+  // --reset-settings: the saved settings (mcla.toml, the menus' choices) put aside before they are read, so every
+  // option is back at its default: the way out of a choice the game cannot start with (a render size too large
+  // for the card). The file is kept as mcla.toml.reset-<n>. The settings menu's RESET TO DEFAULTS does the same.
+#ifdef _WIN32
+  if (std::wstring(GetCommandLineW()).find(L"--reset-settings") != std::wstring::npos) {
+    std::error_code error;
+    if (std::filesystem::exists(paths.config_path, error)) {
+      std::filesystem::path aside;
+      for (int n = 1; n < 100; ++n) {
+        aside = paths.config_path;
+        aside += ".reset-" + std::to_string(n);
+        if (!std::filesystem::exists(aside, error)) {
+          break;
+        }
+      }
+      std::filesystem::rename(paths.config_path, aside, error);
+      REXLOG_INFO("settings reset: {} put aside as {}", paths.config_path.string(), aside.filename().string());
+    }
+  }
+#endif
   if (!paths.game_data_root.empty()) {
     return;
   }
