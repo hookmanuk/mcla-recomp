@@ -35,6 +35,12 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/ui/windowed_app_context.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 REXCVAR_DEFINE_BOOL(mcla_motion_blur, true, "MCLA", "Motion blur");
 REXCVAR_DEFINE_BOOL(mcla_depth_of_field, true, "MCLA", "Depth of field blur");
 REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
@@ -54,6 +60,7 @@ double RefreshHz();  // rexglue vr_openxr
 }  // namespace rex::ui::vulkan::vr
 
 void VrApplyHeadsetSize();  // perf_options.cpp
+bool MsaaOff();             // perf_options.cpp
 
 namespace {
 
@@ -418,7 +425,7 @@ void SaveChangedOptions(const std::filesystem::path& path) {
   }
 }
 
-enum class ItemKind { kToggle, kStringChoice, kNumberChoice };
+enum class ItemKind { kToggle, kStringChoice, kNumberChoice, kAction };
 
 struct ItemDef {
   const char* key;    // menu state name and string-table key; must be unique
@@ -565,7 +572,46 @@ ItemDef kVrItems[] = {
      kVrDlssModelLabels, nullptr, 7},
     {"PM_MxVrFrameCap", ItemKind::kStringChoice, "vr_frame_cap", "FRAME RATE CAP", kVrFrameCapValues,
      kVrFrameCapLabels, nullptr, 3},
+    {"PM_MxVrRestart", ItemKind::kAction, nullptr, "RESTART GAME"},
 };
+
+// What a restart applies (RESTART GAME is enabled when either differs from the start): the render size and MSAA (the
+// headset size's MSAA, or the anti-aliasing toggle outside VR). Noted when the menu is first made, before any change.
+std::string g_start_resolution;
+bool g_start_msaa_off = false;
+
+bool RestartNeeded() {
+  return OptionGet("vr_resolution") != g_start_resolution || MsaaOff() != g_start_msaa_off;
+}
+
+void SaveSettingsIfChanged();
+
+// The settings saved, the same program started again with the same command line, and this one ended at once (the
+// orderly quit hangs with the headset session open).
+void RestartGame() {
+  SaveSettingsIfChanged();
+#ifdef _WIN32
+  wchar_t path[MAX_PATH];
+  if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) {
+    REXLOG_ERROR("settings menu: restart: no program path");
+    return;
+  }
+  std::wstring command = GetCommandLineW();
+  STARTUPINFOW startup{sizeof(startup)};
+  PROCESS_INFORMATION process{};
+  if (!CreateProcessW(path, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process)) {
+    REXLOG_ERROR("settings menu: restart: the new process did not start ({})", GetLastError());
+    return;
+  }
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  REXLOG_INFO("settings menu: restarting");
+  rex::FlushLogging();
+  TerminateProcess(GetCurrentProcess(), 0);
+#else
+  REXLOG_INFO("settings menu: restart is not available here");
+#endif
+}
 
 void VrHeadsetLabels() {
   static std::string labels[kVrHeadsetMax];
@@ -625,13 +671,15 @@ constexpr int kMenuCount = int(sizeof(kMenus) / sizeof(kMenus[0]));
 constexpr int kMaxRows = 16;
 
 int ItemValueCount(const ItemDef& item) {
-  return item.kind == ItemKind::kToggle ? 2 : item.value_count;
+  return item.kind == ItemKind::kToggle ? 2 : item.kind == ItemKind::kAction ? 1 : item.value_count;
 }
 
 std::string ItemValueLabel(const ItemDef& item, int index) {
   switch (item.kind) {
     case ItemKind::kToggle:
       return index ? "ON" : "OFF";
+    case ItemKind::kAction:
+      return "";
     case ItemKind::kStringChoice:
       return item.value_labels[index];
     case ItemKind::kNumberChoice: {
@@ -647,10 +695,15 @@ std::string ItemValueLabel(const ItemDef& item, int index) {
 }
 
 int ItemCurrentIndex(const ItemDef& item) {
+  if (item.kind == ItemKind::kAction) {
+    return 0;
+  }
   const std::string value = OptionGet(item.option);
   switch (item.kind) {
     case ItemKind::kToggle:
       return value == "true" ? 1 : 0;
+    case ItemKind::kAction:
+      return 0;
     case ItemKind::kStringChoice:
       for (int i = 0; i < item.value_count; ++i) {
         if (value == item.values[i]) {
@@ -679,7 +732,7 @@ int ItemCurrentIndex(const ItemDef& item) {
 std::atomic<bool> g_settings_dirty{false};
 
 void ItemSetIndex(const ItemDef& item, int index) {
-  if (index < 0 || index >= ItemValueCount(item)) {
+  if (index < 0 || index >= ItemValueCount(item) || item.kind == ItemKind::kAction) {
     return;
   }
   switch (item.kind) {
@@ -688,6 +741,8 @@ void ItemSetIndex(const ItemDef& item, int index) {
       break;
     case ItemKind::kStringChoice:
       OptionSet(item.option, item.values[index]);
+      break;
+    case ItemKind::kAction:
       break;
     case ItemKind::kNumberChoice: {
       char buffer[32];
@@ -720,7 +775,6 @@ MenuRows g_rows[kMenuCount];
 std::atomic<uint32_t> g_menu_button_key[kMenuCount] = {};
 std::atomic<uint32_t> g_menu_state[kMenuCount] = {};
 std::atomic<uint32_t> g_menu_title[kMenuCount] = {};
-std::atomic<uint32_t> g_quit_button_key{0};
 std::atomic<int> g_active_menu{-1};
 std::atomic<bool> g_menus_created{false};
 
@@ -802,7 +856,12 @@ bool BuildRows(int menu) {
     }
     std::memset(Membase() + row, 0, kRowObjectSize);
 
-    if (item.kind == ItemKind::kToggle) {
+    if (item.kind == ItemKind::kAction) {  // a label row, greyed out until it would do something
+      CallGuest(kLabelRowCtorFn, row, name, 0u);
+      Write32(row + kRowEnabled, RestartNeeded() ? 1 : 0);
+      rows.row[i] = row;
+      rows.last_index[i] = 0;
+    } else if (item.kind == ItemKind::kToggle) {
       // The checkbox class has no constructor of its own: the label row's
       // constructor runs and the checkbox vtable is written over it.
       CallGuest(kLabelRowCtorFn, row, name, 0u);
@@ -851,7 +910,9 @@ void SyncRowsFromOptions(int menu) {
   for (int i = 0; i < rows.count; ++i) {
     const ItemDef& item = def.items[i];
     const int index = ItemCurrentIndex(item);
-    if (item.kind == ItemKind::kToggle) {
+    if (item.kind == ItemKind::kAction) {
+      Write32(rows.row[i] + kRowEnabled, RestartNeeded() ? 1 : 0);
+    } else if (item.kind == ItemKind::kToggle) {
       rows.last_index[i] = index;
       Write8(rows.row[i] + kRowChecked, uint8_t(index));
     } else {
@@ -868,6 +929,10 @@ void PollRows(int menu) {
   for (int i = 0; i < rows.count; ++i) {
     const ItemDef& item = def.items[i];
     const int count = ItemValueCount(item);
+    if (item.kind == ItemKind::kAction) {
+      Write32(rows.row[i] + kRowEnabled, RestartNeeded() ? 1 : 0);
+      continue;
+    }
     if (item.kind == ItemKind::kToggle) {
       const int checked = ItemCurrentIndex(item);
       if (checked != rows.last_index[i]) {
@@ -968,6 +1033,8 @@ void CreateSubmenus() {
   if (g_menus_created.load(std::memory_order_relaxed)) {
     return;
   }
+  g_start_resolution = OptionGet("vr_resolution");  // before any change in the menu
+  g_start_msaa_off = MsaaOff();
   VrResolutionLabels();  // the card's memory and DLSS are known once the GPU has started
   VrHeadsetLabels();
   VrFrameCapLabels();
@@ -1007,14 +1074,6 @@ void CreateSubmenus() {
     BuildRows(menu);
   }
 
-  constexpr const char* kQuitKey = "PM_MxQuit";
-  uint32_t quit = CreateMenuState(kQuitKey);
-  uint32_t quit_key = AllocGuestString(kQuitKey);
-  if (quit && quit_key) {
-    AppendMenuItem(settings, quit);
-    SetStringTableText(kQuitKey, "QUIT GAME");
-    g_quit_button_key.store(quit_key, std::memory_order_relaxed);
-  }
   g_menus_created.store(true, std::memory_order_relaxed);
   REXLOG_INFO("settings menu: {} submenus added to the pause menu", kMenuCount);
 }
@@ -1098,21 +1157,17 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     const MenuDef& def = kMenus[active];
     if (index < uint32_t(def.item_count)) {
       const ItemDef& item = def.items[index];
+      if (item.kind == ItemKind::kAction) {
+        if (RestartNeeded()) {
+          RestartGame();
+        }
+        r3.u64 = 1;
+        return true;
+      }
       const int count = ItemValueCount(item);
       ItemSetIndex(item, (ItemCurrentIndex(item) + 1) % count);
       SyncRowsFromOptions(active);
       ShowSubmenu();
-    }
-    r3.u64 = 1;
-    return true;
-  }
-
-  if (ButtonClicked(g_quit_button_key.load(std::memory_order_relaxed))) {
-    auto* runtime = rex::Runtime::instance();
-    if (auto* context = runtime ? runtime->app_context() : nullptr) {
-      REXLOG_INFO("settings menu: quit requested");
-      SaveSettingsIfChanged();
-      context->RequestDeferredQuit();
     }
     r3.u64 = 1;
     return true;
