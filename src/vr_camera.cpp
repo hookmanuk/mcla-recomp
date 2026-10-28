@@ -61,15 +61,6 @@ FramePose g_frame_poses[2];
 // director's camera (director + 0x1C0, the matrix the camera object caller sets). The chassis (*(target + 28) + 16)
 // moves under the body: holding the camera to it moved the interior the other way (6% in scale).
 std::atomic<uint32_t> g_director{0};   // the camera director (r30 at the camera object caller)
-
-// The frame's camera as the game made it and as posed (the camera hook's own callers): the game sets the same
-// camera into its viewports again from other places in a frame (0x822E87EC, 0x822E893C, 0x822E8984, 0x822E8A04,
-// 0x822FB4E8, 0x8233AC08, ...), and what runs then (the city's culling among it) saw the camera without the head's
-// turn: looking sideways, the buildings there had walls missing (the right stick, turning the game's camera, did
-// not). Those settings of the same camera get the posed one (PoseCopiedCamera).
-std::mutex g_copy_mutex;
-bool g_copy_valid = false;
-float g_copy_game[16], g_copy_posed[16];
 std::atomic<uint32_t> g_car_matrix{0};  // the active camera's car's body matrix
 
 float LoadFloat(const uint8_t* p) {
@@ -219,33 +210,6 @@ void HoldCockpitCamera(uint8_t* base, float (&m)[16], bool learn) {
   }
 }
 
-// A camera the game sets from elsewhere (r4): the frame's camera, posed, when it is the same matrix.
-bool PoseCopiedCamera(PPCContext& ctx, uint8_t* base) {
-  float posed[16];
-  {
-    std::scoped_lock lock{g_copy_mutex};
-    if (!g_copy_valid) {
-      return false;
-    }
-    const uint8_t* source = base + ctx.r4.u32;
-    for (int i = 0; i < 16; ++i) {
-      if (std::abs(LoadFloat(source + 4 * i) - g_copy_game[i]) > 1e-3f) {
-        return false;
-      }
-    }
-    std::memcpy(posed, g_copy_posed, sizeof(posed));
-  }
-  static uint32_t scratch = 0;
-  if (!scratch) {
-    scratch = rex::Runtime::instance()->memory()->SystemHeapAlloc(64, 16);
-  }
-  for (int i = 0; i < 16; ++i) {
-    StoreFloat(base + scratch + 4 * i, posed[i]);
-  }
-  ctx.r4.u32 = scratch;
-  return true;
-}
-
 }  // namespace
 
 // The game camera's update (r3 the camera): when it rewrites the director's camera it is the active camera, and its
@@ -318,9 +282,6 @@ extern "C" REX_FUNC(sub_8217CE80) {
     ProbeCamera("CE80", ctx.r3.u32, uint32_t(ctx.lr), base, ctx.r4.u32);
   }
   if ((uint32_t(ctx.lr) != kCameraOriginCaller && uint32_t(ctx.lr) != kCameraObjectCaller) || !vr::Active()) {
-    if (vr::Active()) {
-      PoseCopiedCamera(ctx, base);
-    }
     __imp__sub_8217CE80(ctx, base);
     return;
   }
@@ -408,12 +369,6 @@ extern "C" REX_FUNC(sub_8217CE80) {
   }
   out[15] = m[15];
   std::memcpy(entry->out, out, sizeof(out));
-  {
-    std::scoped_lock lock{g_copy_mutex};
-    std::memcpy(g_copy_game, entry->in, sizeof(g_copy_game));
-    std::memcpy(g_copy_posed, out, sizeof(g_copy_posed));
-    g_copy_valid = true;
-  }
   uint8_t* target = base + scratch;
   for (int i = 0; i < 16; ++i) {
     StoreFloat(target + 4 * i, out[i]);

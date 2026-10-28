@@ -458,17 +458,6 @@ void mcla_dev_option_registered(PPCRegister& r3) {
   if (!LooksLikePointer(name)) {
     return;
   }
-  // Development: MCLA_DEV_SWITCHES="noumbra,nopvs" sets those of the game's developer switches too.
-  if (const char* wanted = std::getenv("MCLA_DEV_SWITCHES")) {
-    const std::string list = std::string(",") + wanted + ",";
-    if (list.find(std::string(",") + reinterpret_cast<const char*>(base + name) + ",") != std::string::npos) {
-      if (const uint32_t value = DevSwitchValue()) {
-        Write32(base, node + 4, value);
-        REXLOG_INFO("perf options: developer switch '{}' set (MCLA_DEV_SWITCHES)",
-                    reinterpret_cast<const char*>(base + name));
-      }
-    }
-  }
   for (const DevSwitch& dev_switch : kDevSwitches) {
     if (std::strcmp(reinterpret_cast<const char*>(base + name), dev_switch.name) != 0) {
       continue;
