@@ -7724,10 +7724,10 @@ index 0000000..baf710c
 +}  // namespace rex::ui::vulkan::vr::dlss
 diff --git a/src/ui/vulkan/vr_openxr.cpp b/src/ui/vulkan/vr_openxr.cpp
 new file mode 100644
-index 0000000..09af76c
+index 0000000..a074125
 --- /dev/null
 +++ b/src/ui/vulkan/vr_openxr.cpp
-@@ -0,0 +1,1821 @@
+@@ -0,0 +1,1835 @@
 +// VR fork: OpenXR session, frame loop and the floating screen. See vr_openxr.h. Ported from the Uncharted port's
 +// renderer_vulkan/vr/vr_openxr.cpp (itself the Driveclub recomp's), with the same pacing.
 +
@@ -9376,6 +9376,20 @@ index 0000000..09af76c
 +  static std::chrono::steady_clock::time_point next{};
 +  if (!Active() || !g.capped.load(std::memory_order_relaxed)) {
 +    next = {};
++    return;
++  }
++  // The swap waits for the headset's next frame (its token; MCLA_VR_PACE_TOKEN=0: the timer below). The timer's
++  // schedule of the refresh period drifted against the headset's frames: parked at 90 Hz, frames over a period
++  // 2.4% -> 0.9% (2x4: 5.5% -> 0.6%), 1% low 79.5 -> 81.4 (2x4: 78 -> 83.6). Waiting here at the swap, unlike at the
++  // frame timer before (0517679), does not put the game, GPU thread and GPU in series.
++  static const bool token_pacing = [] {
++    const char* v = std::getenv("MCLA_VR_PACE_TOKEN");
++    return !(v && v[0] == '0');
++  }();
++  if (token_pacing && REXCVAR_GET(vr_frame_cap) <= 1) {
++    std::unique_lock lock{g.token_mutex};
++    g.token_cv.wait_for(lock, std::chrono::milliseconds(50), [] { return g.flip_token.load(std::memory_order_relaxed); });
++    g.flip_token.store(false, std::memory_order_relaxed);
 +    return;
 +  }
 +  const uint64_t refresh = g.refresh_period_ns.load(std::memory_order_relaxed);
