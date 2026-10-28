@@ -583,6 +583,7 @@ ItemDef kVrItems[] = {
      kVrHeadsetValues, kVrHeadsetLabels, nullptr, kVrHeadsetMax},
     {"PM_MxVrDlssModel", ItemKind::kStringChoice, "vr_dlss_model", "DLSS MODEL", kVrDlssModelValues,
      kVrDlssModelLabels, nullptr, 7},
+    {"PM_MxVrCockpitSway", ItemKind::kToggle, "vr_cockpit_sway", "COCKPIT SWAY"},
     {"PM_MxVrFrameCap", ItemKind::kStringChoice, "vr_frame_cap", "FRAME RATE CAP", kVrFrameCapValues,
      kVrFrameCapLabels, nullptr, 3},
     {"PM_MxVrRestart", ItemKind::kAction, nullptr, "RESTART GAME"},
