@@ -42,11 +42,6 @@ constexpr uint32_t kCameraOriginCaller = 0x82312D3C;      // the update thread, 
 // The update thread's first setting of the frame's camera (from the camera object, sub_8233AF30). The one above is in
 // the sun-shadow phase, which the SHADOWS option leaves out: without this one the camera then went unposed.
 constexpr uint32_t kCameraObjectCaller = 0x8233B438;
-// The render thread's setting of the frame's camera into its viewport, from the copy the update thread kept (unposed),
-// before it culls and draws the frame: the city's culling saw the camera without the head's turn (looking 90 degrees
-// left at the start, the building there had its walls missing; the right stick, turning the game's camera, did not).
-// It gets the posed camera that frame was built with (that viewport's FramePose), so the culling matches the picture.
-constexpr uint32_t kRenderCameraCaller = 0x822C08B4;
 
 // The head pose each main viewport's frame was built with (the update thread fills one of the two viewports while
 // the render thread draws the other): set at the camera's origin, used at the render thread's Perspective call.
@@ -54,9 +49,6 @@ struct FramePose {
   uint32_t viewport = 0;
   bool posed = false;
   float pose[16]{}, tangents[4]{};
-  // The frame's camera as the game made it and as posed (the culling's camera: kRenderCameraCaller).
-  bool has_camera = false;
-  float game[16]{}, out[16]{};
 };
 std::mutex g_pose_mutex;
 FramePose g_frame_poses[2];
@@ -289,38 +281,6 @@ extern "C" REX_FUNC(sub_8217CE80) {
   if (REXCVAR_GET(mcla_vr_camera_log)) {
     ProbeCamera("CE80", ctx.r3.u32, uint32_t(ctx.lr), base, ctx.r4.u32);
   }
-  if (uint32_t(ctx.lr) == kRenderCameraCaller && vr::Active()) {
-    float out[16];
-    bool found = false;
-    {
-      std::scoped_lock lock{g_pose_mutex};
-      for (const FramePose& f : g_frame_poses) {
-        if (f.viewport != ctx.r3.u32 || !f.posed || !f.has_camera) {
-          continue;
-        }
-        found = true;
-        for (int i = 0; i < 16 && found; ++i) {  // the axes and position (the w column can be NaN)
-          found = (i & 3) == 3 || std::abs(LoadFloat(base + ctx.r4.u32 + 4 * i) - f.game[i]) <= 1e-3f;
-        }
-        if (found) {
-          std::memcpy(out, f.out, sizeof(out));
-          break;
-        }
-      }
-    }
-    if (found) {
-      static uint32_t scratch = 0;
-      if (!scratch) {
-        scratch = rex::Runtime::instance()->memory()->SystemHeapAlloc(64, 16);
-      }
-      for (int i = 0; i < 16; ++i) {
-        StoreFloat(base + scratch + 4 * i, out[i]);
-      }
-      ctx.r4.u32 = scratch;
-    }
-    __imp__sub_8217CE80(ctx, base);
-    return;
-  }
   if ((uint32_t(ctx.lr) != kCameraOriginCaller && uint32_t(ctx.lr) != kCameraObjectCaller) || !vr::Active()) {
     __imp__sub_8217CE80(ctx, base);
     return;
@@ -409,16 +369,6 @@ extern "C" REX_FUNC(sub_8217CE80) {
   }
   out[15] = m[15];
   std::memcpy(entry->out, out, sizeof(out));
-  {
-    std::scoped_lock lock{g_pose_mutex};
-    for (FramePose& f : g_frame_poses) {
-      if (f.viewport == ctx.r3.u32) {
-        std::memcpy(f.game, entry->in, sizeof(f.game));
-        std::memcpy(f.out, out, sizeof(f.out));
-        f.has_camera = true;
-      }
-    }
-  }
   uint8_t* target = base + scratch;
   for (int i = 0; i < 16; ++i) {
     StoreFloat(target + 4 * i, out[i]);
