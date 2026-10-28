@@ -43,6 +43,12 @@
 
 REXCVAR_DEFINE_BOOL(mcla_motion_blur, true, "MCLA", "Motion blur");
 REXCVAR_DEFINE_BOOL(mcla_depth_of_field, true, "MCLA", "Depth of field blur");
+// Picture options, applied by the renderer (rexglue command_processor) to the shaders' constants.
+REXCVAR_DEFINE_STRING(mcla_car_windows, "game", "MCLA",
+                      "Car window glass: game, light (half its haze) or clear");
+REXCVAR_DEFINE_BOOL(mcla_sun_glow, true, "MCLA", "The glow around the sun");
+REXCVAR_DEFINE_BOOL(mcla_bloom, true, "MCLA", "Bloom (glow around bright areas)");
+REXCVAR_DEFINE_BOOL(mcla_colour_grade, true, "MCLA", "The game's warm colour grade (off: neutral colours)");
 REXCVAR_DEFINE_BOOL(mcla_settings_menu, true, "MCLA",
                     "Add the settings submenus to the pause menu");
 
@@ -453,6 +459,8 @@ constexpr double kFpsTargets[] = {30.0, 60.0, 120.0, 0.0};
 constexpr int kFpsTargetCount = int(sizeof(kFpsTargets) / sizeof(kFpsTargets[0]));
 constexpr const char* kPromptValues[] = {"auto", "xbox", "playstation"};
 constexpr const char* kPromptLabels[] = {"AUTO", "XBOX", "PLAYSTATION"};
+constexpr const char* kCarWindowValues[] = {"game", "light", "clear"};
+constexpr const char* kCarWindowLabels[] = {"GAME", "LIGHT", "CLEAR"};
 constexpr const char* kIntroValues[] = {"normal", "fast", "skip"};
 constexpr const char* kIntroLabels[] = {"NORMAL", "FAST", "SKIP (NO LOGO)"};
 
@@ -467,6 +475,11 @@ const ItemDef kDisplayItems[] = {
 #endif
     {"PM_MxMotionBlur", ItemKind::kToggle, "mcla_motion_blur", "MOTION BLUR"},
     {"PM_MxDof", ItemKind::kToggle, "mcla_depth_of_field", "DEPTH OF FIELD"},
+    {"PM_MxCarWindows", ItemKind::kStringChoice, "mcla_car_windows", "CAR WINDOWS", kCarWindowValues,
+     kCarWindowLabels, nullptr, 3},
+    {"PM_MxSunGlow", ItemKind::kToggle, "mcla_sun_glow", "SUN GLOW"},
+    {"PM_MxBloom", ItemKind::kToggle, "mcla_bloom", "BLOOM"},
+    {"PM_MxColourGrade", ItemKind::kToggle, "mcla_colour_grade", "COLOUR GRADE"},
 };
 
 // Detail the game can do without when the frame rate matters more; all as
