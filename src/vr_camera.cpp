@@ -55,7 +55,7 @@ FramePose g_frame_poses[2];
 
 // The cockpit camera's sway: the game slides the cockpit camera along the car as it accelerates (~15 cm back) and
 // brakes (forward): against the dashboard ~3.5 cm and a degree of pitch. Without vr_cockpit_sway the camera is held
-// at its place in the car's body when the car last stood still (the seat). The body is the active camera's target's
+// at its place in the car's body when the car last stood still for 2 s (the seat). The body is the active camera's target's
 // matrix at target + 272 (rows scaled; the camera moves in it as against the dashboard drawn: 0.476 -> 0.441 m while
 // the GPU saw 0.994 -> 0.960); the target is at +48 of the camera object whose update (sub_822AA040) rewrites the
 // director's camera (director + 0x1C0, the matrix the camera object caller sets). The chassis (*(target + 28) + 16)
@@ -125,9 +125,9 @@ uint32_t LoadU32(const uint8_t* p) {
   return __builtin_bswap32(v);
 }
 
-// Holds the cockpit camera (m: rows, the game's camera) at its seat in the car: its place, and its pitch with no roll
-// (the game's heading is kept: looking left or right). The seat is where the camera was in the body's frame after the
-// car stood still for half a second (learn: the update thread's first setting of a frame); only a camera inside the
+// Holds the cockpit camera (m: rows, the game's camera) at its seat in the car: takes the sway (its place in the body
+// against the seat's) back out of the game's camera; the game's rotation is kept. The seat is where the camera was in the body's frame after the
+// car stood still for 2 s (learn: the update thread's first setting of a frame); only a camera inside the
 // car looking along it (cockpit view, not the bumper, chase or look-back views) is held.
 void HoldCockpitCamera(uint8_t* base, float (&m)[16], bool learn) {
   const uint32_t car_address = g_car_matrix.load(std::memory_order_relaxed);
@@ -159,54 +159,36 @@ void HoldCockpitCamera(uint8_t* base, float (&m)[16], bool learn) {
   const float along = m[8] * rows[2][0] + m[9] * rows[2][1] + m[10] * rows[2][2];  // the camera's back on the car's
   const bool cockpit = std::abs(local[0]) < 1.2f && local[1] > 0.3f && local[1] < 2.f && std::abs(local[2]) < 1.5f &&
                        along > 0.9f;
-  float back[3];  // the camera's back in the body's frame
-  for (int r = 0; r < 3; ++r) {
-    back[r] = m[8] * rows[r][0] + m[9] * rows[r][1] + m[10] * rows[r][2];
-  }
   static uint32_t seat_car = 0;
   static bool have_seat = false;
-  static float seat[3], seat_pitch = 0.f, last_position[3];
-  static int still = 0;
+  static float seat[3], last_position[3];
+  static std::chrono::steady_clock::time_point moved;
   if (learn) {
     if (car_address != seat_car) {
       seat_car = car_address;
       have_seat = false;
-      still = 0;
+      moved = std::chrono::steady_clock::now();
     }
     const float dx = position[0] - last_position[0], dy = position[1] - last_position[1],
                 dz = position[2] - last_position[2];
     std::memcpy(last_position, position, sizeof(position));
-    still = dx * dx + dy * dy + dz * dz < 1e-6f ? still + 1 : 0;  // under 1 mm a frame
-    if (cockpit && still >= 30) {
+    if (!(dx * dx + dy * dy + dz * dz < 1e-6f)) {  // under 1 mm a call
+      moved = std::chrono::steady_clock::now();
+    }
+    // Still for 2 s: the camera's spring has settled (0.17 s learnt seats while it still swung: a wrong place).
+    if (cockpit && std::chrono::steady_clock::now() - moved > std::chrono::seconds(2)) {
       std::memcpy(seat, local, sizeof(seat));
-      seat_pitch = back[1];
       have_seat = true;
     }
   }
+  // The sway: the camera's place in the body less the seat's, taken out exactly (a filtered one, or the pitch taken
+  // out too, shook the car's roof against the camera by up to 3 px a frame while driving: the world juddered).
   if (!cockpit || !have_seat || seat_car != car_address) {
     return;
   }
   for (int c = 0; c < 3; ++c) {
-    m[12 + c] = position[c] + seat[0] * rows[0][c] + seat[1] * rows[1][c] + seat[2] * rows[2][c];
-  }
-  // In the body's frame: back keeps its heading at the seat's pitch, up is the body's up made square to it.
-  const float level = std::sqrt(back[0] * back[0] + back[2] * back[2]);
-  if (!(level > 1e-3f)) {
-    return;
-  }
-  const float flat = std::sqrt(std::max(0.f, 1.f - seat_pitch * seat_pitch)) / level;
-  const float b[3] = {back[0] * flat, seat_pitch, back[2] * flat};
-  float u[3] = {-b[1] * b[0], 1.f - b[1] * b[1], -b[1] * b[2]};  // (0, 1, 0) less its part along b
-  const float u_length = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
-  for (float& v : u) {
-    v /= u_length;
-  }
-  const float x[3] = {u[1] * b[2] - u[2] * b[1], u[2] * b[0] - u[0] * b[2], u[0] * b[1] - u[1] * b[0]};  // up x back
-  const float* axes[3] = {x, u, b};
-  for (int r = 0; r < 3; ++r) {
-    for (int c = 0; c < 3; ++c) {
-      m[r * 4 + c] = axes[r][0] * rows[0][c] + axes[r][1] * rows[1][c] + axes[r][2] * rows[2][c];
-    }
+    m[12 + c] -= (local[0] - seat[0]) * rows[0][c] + (local[1] - seat[1]) * rows[1][c] +
+                 (local[2] - seat[2]) * rows[2][c];
   }
 }
 
