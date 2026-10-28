@@ -31,8 +31,6 @@ REX_EXTERN(__imp__sub_8230BC38);
 
 REXCVAR_DEFINE_DOUBLE(mcla_vr_world_scale, 1.0, "MCLA", "VR: game units per metre of head movement");
 REXCVAR_DEFINE_BOOL(mcla_vr_camera_log, false, "MCLA", "VR, development: log the main camera's matrices");
-REXCVAR_DEFINE_STRING(vr_foliage, "facing", "VR",
-                      "Live: the distant trees' cards: facing (each turned to you) or fixed (facing the car's forward)");
 REXCVAR_DEFINE_BOOL(vr_cockpit_sway, false, "VR",
                     "The cockpit camera sliding in the car as it accelerates and brakes (off: held at the seat)");
 
