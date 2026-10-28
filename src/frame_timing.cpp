@@ -66,6 +66,7 @@ constexpr double kMaxFrameSeconds = 0.125;
 
 // Set when the frame limiter has run; see PaceUnlimitedSwap.
 std::atomic<bool> g_limiter_ran_since_swap{false};
+std::atomic<uint64_t> g_limiter_last_us{0};  // when it last ran
 
 bool OriginalTiming() {
   return REXCVAR_GET(mcla_fps) < 0;
@@ -144,6 +145,7 @@ void mcla_frame_delta(PPCRegister& r8) {
   }
   WaitForFrameDeadline();
   g_limiter_ran_since_swap.store(true, std::memory_order_relaxed);
+  g_limiter_last_us.store(NowMicros(), std::memory_order_relaxed);
   // r8 was computed before the wait. Whatever the wait added is picked up by
   // the next frame's measurement, so no time is lost, only shifted one frame.
   static const uint64_t max_ticks = static_cast<uint64_t>(
@@ -169,15 +171,18 @@ void mcla_fixed_step_path(PPCRegister& r3, PPCRegister& f11) {
 // two vblanks, which is removed here, so they ran as fast as the host could
 // present: the logo sequence was over in about a second. A swap that follows
 // another with no pass through the frame limiter in between is held to the
-// original 30 per second.
+// original 30 per second. Not while the game loop runs (the limiter ran in the last 200 ms): a render thread that
+// outruns the update presents the last image again between updates (MCLA with shadows off, every other swap), and
+// holding those to 30 a second capped the whole game at about 38 updates a second.
 
 static void PaceUnlimitedSwap() {
   static std::atomic<uint64_t> last_swap_us{0};
   constexpr uint64_t kPeriodMicros = 1'000'000ull / 30;
-  const bool limited = g_limiter_ran_since_swap.exchange(false, std::memory_order_relaxed) ||
-                       REXCVAR_GET(mcla_intro) != "normal";
-  const uint64_t last = last_swap_us.load(std::memory_order_relaxed);
   uint64_t now = NowMicros();
+  const bool limited = g_limiter_ran_since_swap.exchange(false, std::memory_order_relaxed) ||
+                       REXCVAR_GET(mcla_intro) != "normal" ||
+                       now - g_limiter_last_us.load(std::memory_order_relaxed) < 200'000;
+  const uint64_t last = last_swap_us.load(std::memory_order_relaxed);
   if (!limited && last && now - last < kPeriodMicros) {
     std::this_thread::sleep_for(std::chrono::microseconds(kPeriodMicros - (now - last)));
     now = NowMicros();
