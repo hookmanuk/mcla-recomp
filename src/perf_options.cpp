@@ -369,13 +369,16 @@ bool ShowingGameplay();
 
 void MclaConfigureGpuDefaults() {
   if (VrRequested()) {
-    // Start pressed outside gameplay (the title's "press start", the front end): the headset recentres on the head,
-    // so the game starts facing where the player sits (Matt 2026-10-27). In gameplay Start pauses, the view stays.
-    // Back no longer recentres (it opens the GPS map): RECENTRE heads the pause menu's VR page (Matt 2026-10-30).
+    // Start pressed before the game is first played (the intro, the title's "press start", the main menu): the headset
+    // recentres on the head, so the game starts facing where the player sits (Matt 2026-10-27, 2026-10-30). Not after
+    // that: the pause menu is on the screen too (not gameplay), and Start closing it recentred. Back no longer
+    // recentres (it opens the GPS map): RECENTRE heads the pause menu's VR page (Matt 2026-10-30).
     rex::input::SetButtonPressedHook([](uint16_t button) {
-      if (button == 0x0010 /* START */ && !rex::ui::vulkan::vr::ShowingGameplay()) {
+      static bool played = false;
+      played = played || rex::ui::vulkan::vr::ShowingGameplay();
+      if (button == 0x0010 /* START */ && !played) {
         rex::ui::vulkan::vr::Recenter();
-        REXLOG_INFO("VR: recentred (Start outside gameplay)");
+        REXLOG_INFO("VR: recentred (Start before the game is played)");
       }
     });
   }
