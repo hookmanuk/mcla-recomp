@@ -560,5 +560,21 @@ extern "C" REX_FUNC(sub_8217CE80) {
     StoreFloat(target + 4 * i, out[i]);
   }
   ctx.r4.u32 = scratch;
+  const uint32_t viewport = ctx.r3.u32;
   __imp__sub_8217CE80(ctx, base);
+  // The viewport keeps the game's own camera (+64, and +320 with its w column as the setter made it); its view (+384)
+  // and what is built from it stay posed, for the drawing. The game reads its camera back to move it on from: the
+  // warp to a race from the GPS map eases it down into the seat. Read back posed, each step got the head's pose again
+  // and the camera settled turned and moved by the head (a real head is never exactly at the recentred origin): out of
+  // the car, and the race's intro waited for it with the controls locked. MCLA_VR_UNPOSED_READBACK=0 keeps it posed.
+  static const bool unposed_readback =
+      !(std::getenv("MCLA_VR_UNPOSED_READBACK") && std::getenv("MCLA_VR_UNPOSED_READBACK")[0] == '0');
+  if (unposed_readback) {
+    for (int i = 0; i < 16; ++i) {
+      StoreFloat(base + viewport + 64 + 4 * i, game[i]);
+      if ((i & 3) != 3) {
+        StoreFloat(base + viewport + 320 + 4 * i, game[i]);
+      }
+    }
+  }
 }
