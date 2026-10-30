@@ -63,6 +63,7 @@ namespace dlss {
 bool Ready();  // rexglue vr_dlss
 }  // namespace dlss
 double RefreshHz();  // rexglue vr_openxr
+void Recenter();
 }  // namespace rex::ui::vulkan::vr
 
 void VrApplyHeadsetSize();  // perf_options.cpp
@@ -285,6 +286,21 @@ void AppendMenuItem(uint32_t parent, uint32_t child) {
   }
   Write32(child + 32, parent);
   Write32(child + 36, 0);
+}
+
+// The same, as the first child: VR heads the settings (Matt 2026-10-30).
+void PrependMenuItem(uint32_t parent, uint32_t child) {
+  if (!parent || !child || Read32(child + 32) != 0) {
+    return;
+  }
+  const uint32_t head = Read32(parent + 44);
+  Write32(child + 36, head);
+  Write32(child + 40, 0);
+  if (head) {
+    Write32(head + 40, child);
+  }
+  Write32(parent + 44, child);
+  Write32(child + 32, parent);
 }
 
 uint32_t MenuRootNode() {
@@ -577,6 +593,7 @@ void VrFrameCapLabels() {
 }
 
 ItemDef kVrItems[] = {
+    {"PM_MxVrRecentre", ItemKind::kAction, nullptr, "RECENTRE"},
     {"PM_MxVrRes", ItemKind::kStringChoice, "vr_resolution", "RENDER SIZE (RESTART)", kVrResolutionValues,
      kVrResolutionLabels, nullptr, kVrResolutionCount},
     {"PM_MxVrHeadset", ItemKind::kStringChoice, "vr_headset_size", "HEADSET SIZE",
@@ -601,9 +618,10 @@ bool RestartNeeded() {
 
 void SaveSettingsIfChanged();
 
-// An action row's state: RESTART GAME once a restart would apply something, RESET TO DEFAULTS always.
+// An action row's state: RESTART GAME once a restart would apply something, RECENTRE and RESET TO DEFAULTS always.
 bool ActionEnabled(const ItemDef& item) {
-  return std::strcmp(item.key, "PM_MxVrReset") == 0 || RestartNeeded();
+  return std::strcmp(item.key, "PM_MxVrReset") == 0 || std::strcmp(item.key, "PM_MxVrRecentre") == 0 ||
+         RestartNeeded();
 }
 
 // The settings saved, the same program started again with the same command line, and this one ended at once (the
@@ -665,7 +683,11 @@ void VrHeadsetLabels() {
   for (int i = 0; i < count; ++i) {
     kVrHeadsetLabels[i] = labels[i].c_str();
   }
-  kVrItems[1].value_count = count;
+  for (ItemDef& item : kVrItems) {
+    if (std::strcmp(item.key, "PM_MxVrHeadset") == 0) {
+      item.value_count = count;
+    }
+  }
 }
 
 const ItemDef kControlItems[] = {
@@ -1074,7 +1096,11 @@ void CreateSubmenus() {
     if (!button) {
       return;
     }
-    AppendMenuItem(settings, button);
+    if (std::strcmp(def.button_key, "PM_MxTabVr") == 0) {
+      PrependMenuItem(settings, button);  // VR first (Matt 2026-10-30)
+    } else {
+      AppendMenuItem(settings, button);
+    }
     SetStringTableText(def.button_key, def.label);
     g_menu_button_key[menu].store(AllocGuestString(def.button_key), std::memory_order_relaxed);
 
@@ -1183,7 +1209,10 @@ bool mcla_menu_click(PPCRegister& r3, PPCRegister& r31) {
     if (index < uint32_t(def.item_count)) {
       const ItemDef& item = def.items[index];
       if (item.kind == ItemKind::kAction) {
-        if (std::strcmp(item.key, "PM_MxVrReset") == 0) {
+        if (std::strcmp(item.key, "PM_MxVrRecentre") == 0) {
+          rex::ui::vulkan::vr::Recenter();
+          REXLOG_INFO("VR: recentred (the VR menu)");
+        } else if (std::strcmp(item.key, "PM_MxVrReset") == 0) {
           RestartGame(true);
         } else if (RestartNeeded()) {
           RestartGame();
@@ -1335,6 +1364,3 @@ void mcla_dof_composite(PPCRegister& r3) {
   }
   std::memset(Membase() + r3.u32 + 0xF0, 0, 16);
 }
-
-// VR fork: Back in the pause menu recentres the headset (perf_options.cpp).
-bool VrPauseMenuOpen() { return g_vr_pause_open.load(); }

@@ -362,7 +362,6 @@ bool VrRequested() {
 namespace rex::input {
 void SetButtonPressedHook(void (*hook)(uint16_t button));  // rexglue input_system
 }
-bool VrPauseMenuOpen();  // settings_menu.cpp
 namespace rex::ui::vulkan::vr {
 void Recenter();  // rexglue vr_openxr
 bool ShowingGameplay();
@@ -372,18 +371,11 @@ void MclaConfigureGpuDefaults() {
   if (VrRequested()) {
     // Start pressed outside gameplay (the title's "press start", the front end): the headset recentres on the head,
     // so the game starts facing where the player sits (Matt 2026-10-27). In gameplay Start pauses, the view stays.
-    // Back in the pause menu recentres too (Matt 2026-10-27).
+    // Back no longer recentres (it opens the GPS map): RECENTRE heads the pause menu's VR page (Matt 2026-10-30).
     rex::input::SetButtonPressedHook([](uint16_t button) {
-      if (button == 0x0010 /* START */) {
-        if (!rex::ui::vulkan::vr::ShowingGameplay()) {
-          rex::ui::vulkan::vr::Recenter();
-          REXLOG_INFO("VR: recentred (Start outside gameplay)");
-        }
-      } else if (button == 0x0020 /* BACK */) {
-        if (VrPauseMenuOpen()) {
-          rex::ui::vulkan::vr::Recenter();
-          REXLOG_INFO("VR: recentred (Back in the pause menu)");
-        }
+      if (button == 0x0010 /* START */ && !rex::ui::vulkan::vr::ShowingGameplay()) {
+        rex::ui::vulkan::vr::Recenter();
+        REXLOG_INFO("VR: recentred (Start outside gameplay)");
       }
     });
   }

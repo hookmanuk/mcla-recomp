@@ -458,7 +458,9 @@ extern "C" REX_FUNC(sub_8217CE80) {
     g_director.store(ctx.r30.u32, std::memory_order_relaxed);
   }
   FramePose frame{ctx.r3.u32};
-  frame.posed = vr::HeadPose(frame.pose, frame.tangents);
+  // Not under the Back menu's pages (the GPS map, the mission log): a 2D page over a view the game moves itself, shown
+  // whole on the screen (posed, the page was head-locked and cut off, the map culled as the head turned).
+  frame.posed = vr::HeadPose(frame.pose, frame.tangents) && !vr::UiPanel();
   if (frame.posed) {
     // A symmetric frustum covering both eyes' (Perspective has no off-centre form).
     const float h = std::max(-frame.tangents[0], frame.tangents[1]),
