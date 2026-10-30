@@ -381,6 +381,27 @@ extern "C" REX_FUNC(sub_8217D460) {
 
 // grcViewport::SetCameraMtx(this, const Matrix44* camera): rows right, up, back (the camera looks down -z) and
 // position.
+//
+// After the setter: the viewport keeps the game's own camera (+64, and +320 with its w column as the setter made it);
+// its view (+384) and what is built from it stay posed, for the drawing. The game reads its camera back to move it on
+// from: the warp to a race from the GPS map eases it down into the seat. Read back posed, each step got the head's
+// pose again and the camera settled turned and moved by the head (a real head is never exactly at the recentred
+// origin): out of the car, and the race's intro waited for it with the controls locked. Both setters that pose (the
+// update thread's and the render thread's, on the same two viewports) put it back. MCLA_VR_UNPOSED_READBACK=0: off.
+void KeepGameCamera(uint8_t* base, uint32_t viewport, const float (&game)[16]) {
+  static const bool enabled =
+      !(std::getenv("MCLA_VR_UNPOSED_READBACK") && std::getenv("MCLA_VR_UNPOSED_READBACK")[0] == '0');
+  if (!enabled) {
+    return;
+  }
+  for (int i = 0; i < 16; ++i) {
+    StoreFloat(base + viewport + 64 + 4 * i, game[i]);
+    if ((i & 3) != 3) {
+      StoreFloat(base + viewport + 320 + 4 * i, game[i]);
+    }
+  }
+}
+
 extern "C" REX_FUNC(sub_8217CE80) {
   if (REXCVAR_GET(mcla_vr_camera_log)) {
     ProbeCamera("CE80", ctx.r3.u32, uint32_t(ctx.lr), base, ctx.r4.u32);
@@ -446,6 +467,11 @@ extern "C" REX_FUNC(sub_8217CE80) {
         window = std::chrono::steady_clock::now();
       }
     }
+    float game[16];
+    for (int i = 0; i < 16; ++i) {
+      game[i] = LoadFloat(base + ctx.r4.u32 + 4 * i);
+    }
+    const uint32_t viewport = ctx.r3.u32;
     if (found) {
       static uint32_t scratch = 0;
       if (!scratch) {
@@ -457,6 +483,9 @@ extern "C" REX_FUNC(sub_8217CE80) {
       ctx.r4.u32 = scratch;
     }
     __imp__sub_8217CE80(ctx, base);
+    if (found) {
+      KeepGameCamera(base, viewport, game);
+    }
     return;
   }
   if ((uint32_t(ctx.lr) != kCameraOriginCaller && uint32_t(ctx.lr) != kCameraObjectCaller) || !vr::Active()) {
@@ -562,19 +591,5 @@ extern "C" REX_FUNC(sub_8217CE80) {
   ctx.r4.u32 = scratch;
   const uint32_t viewport = ctx.r3.u32;
   __imp__sub_8217CE80(ctx, base);
-  // The viewport keeps the game's own camera (+64, and +320 with its w column as the setter made it); its view (+384)
-  // and what is built from it stay posed, for the drawing. The game reads its camera back to move it on from: the
-  // warp to a race from the GPS map eases it down into the seat. Read back posed, each step got the head's pose again
-  // and the camera settled turned and moved by the head (a real head is never exactly at the recentred origin): out of
-  // the car, and the race's intro waited for it with the controls locked. MCLA_VR_UNPOSED_READBACK=0 keeps it posed.
-  static const bool unposed_readback =
-      !(std::getenv("MCLA_VR_UNPOSED_READBACK") && std::getenv("MCLA_VR_UNPOSED_READBACK")[0] == '0');
-  if (unposed_readback) {
-    for (int i = 0; i < 16; ++i) {
-      StoreFloat(base + viewport + 64 + 4 * i, game[i]);
-      if ((i & 3) != 3) {
-        StoreFloat(base + viewport + 320 + 4 * i, game[i]);
-      }
-    }
-  }
+  KeepGameCamera(base, viewport, game);
 }
