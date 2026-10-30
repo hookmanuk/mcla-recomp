@@ -39,6 +39,11 @@ namespace vr = rex::ui::vulkan::vr;
 namespace {
 
 constexpr uint32_t kMainPerspectiveCaller = 0x822E5EB8;  // the render thread, the main viewport's projection
+// A viewport for 3D pieces of the HUD (the Sidekick phone in the car): the game's field of view with the aspect taken
+// from the main viewport, so in VR the headset's (~1, not 16:9): the phone came out 1.8x as wide, too far left and cut
+// off at the HUD's edge. It gets the game's own aspect (g_game_aspect); the HUD is drawn at 16:9.
+constexpr uint32_t kHudPerspectiveCaller = 0x82725F2C;
+std::atomic<double> g_game_aspect{16.0 / 9.0};  // the main viewport's aspect as the game asks for it
 constexpr uint32_t kCameraOriginCaller = 0x82312D3C;      // the update thread, the frame's camera into its viewport
 // The update thread's first setting of the frame's camera (from the camera object, sub_8233AF30). The one above is in
 // the sun-shadow phase, which the SHADOWS option leaves out: without this one the camera then went unposed.
@@ -339,7 +344,11 @@ extern "C" REX_FUNC(sub_8217D460) {
       REXLOG_INFO("camera seq {} Perspective viewport {:08X}", n, ctx.r3.u32);
     }
   }
+  if (uint32_t(ctx.lr) == kHudPerspectiveCaller && vr::Active()) {
+    ctx.f2.f64 = g_game_aspect.load(std::memory_order_relaxed);
+  }
   if (uint32_t(ctx.lr) == kMainPerspectiveCaller && vr::Active()) {
+    g_game_aspect.store(ctx.f2.f64, std::memory_order_relaxed);
     FramePose frame;
     {
       std::scoped_lock lock{g_pose_mutex};
