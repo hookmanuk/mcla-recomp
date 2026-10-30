@@ -381,18 +381,11 @@ extern "C" REX_FUNC(sub_8217D460) {
 
 // grcViewport::SetCameraMtx(this, const Matrix44* camera): rows right, up, back (the camera looks down -z) and
 // position.
-//
-// After the setter: the viewport keeps the game's own camera (+64, and +320 with its w column as the setter made it);
-// its view (+384) and what is built from it stay posed, for the drawing. The game reads its camera back to move it on
-// from: the warp to a race from the GPS map eases it down into the seat. Read back posed, each step got the head's
-// pose again and the camera settled turned and moved by the head (a real head is never exactly at the recentred
-// origin): out of the car, and the race's intro waited for it with the controls locked. Both setters that pose (the
-// update thread's and the render thread's, on the same two viewports) put it back. MCLA_VR_UNPOSED_READBACK=0: off.
-// After the Back menu's pages (the GPS map) the camera stays unposed until the game's own camera comes to rest (half a
-// second unchanged, at most 8 s): picking a race on the map warps there and eases the camera down from the map into the
-// seat, and with the head moving during that descent it stopped part-way (low, beside the car) for good and the race's
-// intro waited with the controls locked, while kept still it landed. Unposed, the descent runs as on a monitor (on the
-// fixed screen, as the map was). MCLA_VR_SETTLE=0: off. The update thread only (the camera calls it hooks).
+// After the Back menu's pages (the GPS map) the camera stays unposed until the game's own camera is back at the car
+// (within 3 m of it) and at rest (half a second unchanged; 15 s at most): picking a race on the map warps there and
+// swoops the camera down from the map into the seat, and with the head moving during that the camera stopped part-way
+// (low, beside the car) for good and the race's intro waited with the controls locked. Unposed, the swoop runs as on a
+// monitor (on the fixed screen, as the map was). MCLA_VR_SETTLE=0: off. The update thread only.
 bool CameraSettling(const uint8_t* base, uint32_t camera) {
   static const bool enabled = !(std::getenv("MCLA_VR_SETTLE") && std::getenv("MCLA_VR_SETTLE")[0] == '0');
   static bool panel_was = false, settling = false;
@@ -401,14 +394,26 @@ bool CameraSettling(const uint8_t* base, uint32_t camera) {
   if (!enabled) {
     return false;
   }
-  const bool panel = vr::UiPanel();
   const auto now = std::chrono::steady_clock::now();
+  float m[16];
+  for (int i = 0; i < 16; ++i) {
+    m[i] = LoadFloat(base + camera + 4 * i);
+  }
+  bool at_car = false;
+  if (const uint32_t car = g_car_matrix.load(std::memory_order_relaxed)) {
+    float d2 = 0.f;
+    for (int i = 0; i < 3; ++i) {
+      const float d = m[12 + i] - LoadFloat(base + car + 48 + 4 * i);
+      d2 += d * d;
+    }
+    at_car = d2 < 9.f;
+  }
+  const bool panel = vr::UiPanel();
   if (panel_was && !panel) {
-    settling = true;
-    until = now + std::chrono::seconds(8);
-    still_since = now;
-    std::memset(last, 0, sizeof(last));
     REXLOG_INFO("VR: the camera unposed until it settles (after a menu page)");
+    settling = true;
+    until = now + std::chrono::seconds(15);
+    still_since = now;
   }
   panel_was = panel;
   if (!settling) {
@@ -416,11 +421,10 @@ bool CameraSettling(const uint8_t* base, uint32_t camera) {
   }
   bool same = true;
   for (int i = 0; i < 16; ++i) {
-    const float v = LoadFloat(base + camera + 4 * i);
-    same = same && ((i & 3) == 3 || std::abs(v - last[i]) < 1e-3f);
-    last[i] = v;
+    same = same && ((i & 3) == 3 || std::abs(m[i] - last[i]) < 1e-3f);
+    last[i] = m[i];
   }
-  if (!same) {
+  if (!same || !at_car) {
     still_since = now;
   }
   if (now - still_since > std::chrono::milliseconds(500) || now > until) {
@@ -428,20 +432,6 @@ bool CameraSettling(const uint8_t* base, uint32_t camera) {
     REXLOG_INFO("VR: the camera settled, posed again");
   }
   return settling;
-}
-
-void KeepGameCamera(uint8_t* base, uint32_t viewport, const float (&game)[16]) {
-  static const bool enabled =
-      !(std::getenv("MCLA_VR_UNPOSED_READBACK") && std::getenv("MCLA_VR_UNPOSED_READBACK")[0] == '0');
-  if (!enabled) {
-    return;
-  }
-  for (int i = 0; i < 16; ++i) {
-    StoreFloat(base + viewport + 64 + 4 * i, game[i]);
-    if ((i & 3) != 3) {
-      StoreFloat(base + viewport + 320 + 4 * i, game[i]);
-    }
-  }
 }
 
 extern "C" REX_FUNC(sub_8217CE80) {
@@ -509,11 +499,6 @@ extern "C" REX_FUNC(sub_8217CE80) {
         window = std::chrono::steady_clock::now();
       }
     }
-    float game[16];
-    for (int i = 0; i < 16; ++i) {
-      game[i] = LoadFloat(base + ctx.r4.u32 + 4 * i);
-    }
-    const uint32_t viewport = ctx.r3.u32;
     if (found) {
       static uint32_t scratch = 0;
       if (!scratch) {
@@ -525,9 +510,6 @@ extern "C" REX_FUNC(sub_8217CE80) {
       ctx.r4.u32 = scratch;
     }
     __imp__sub_8217CE80(ctx, base);
-    if (found) {
-      KeepGameCamera(base, viewport, game);
-    }
     return;
   }
   if ((uint32_t(ctx.lr) != kCameraOriginCaller && uint32_t(ctx.lr) != kCameraObjectCaller) || !vr::Active()) {
@@ -540,7 +522,7 @@ extern "C" REX_FUNC(sub_8217CE80) {
   FramePose frame{ctx.r3.u32};
   // Not under the Back menu's pages (the GPS map, the mission log): a 2D page over a view the game moves itself, shown
   // whole on the screen (posed, the page was head-locked and cut off, the map culled as the head turned).
-  const bool settling = CameraSettling(base, ctx.r4.u32);  // every call: it watches the menu panel close
+  const bool settling = CameraSettling(base, ctx.r4.u32);  // every call: it watches for the descents
   frame.posed = vr::HeadPose(frame.pose, frame.tangents) && !vr::UiPanel() && !settling;
   if (frame.posed) {
     // A symmetric frustum covering both eyes' (Perspective has no off-centre form).
@@ -632,7 +614,5 @@ extern "C" REX_FUNC(sub_8217CE80) {
     StoreFloat(target + 4 * i, out[i]);
   }
   ctx.r4.u32 = scratch;
-  const uint32_t viewport = ctx.r3.u32;
   __imp__sub_8217CE80(ctx, base);
-  KeepGameCamera(base, viewport, game);
 }
