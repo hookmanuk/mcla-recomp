@@ -1267,7 +1267,12 @@ int64_t VrNowMs() {
       .count();
 }
 
+// The pause menu's builds and cancels so far (VrPauseMenuEvents): Start in the game opens or closes it.
+std::atomic<uint32_t> g_vr_pause_events{0};
+uint32_t VrPauseMenuEvents() { return g_vr_pause_events.load(); }
+
 void VrPauseMenuBuilt() {
+  ++g_vr_pause_events;
   if (VrNowMs() - g_vr_pause_cancel_ms.load() > 100 && !g_vr_pause_open.exchange(true)) {
     REXLOG_INFO("VR: pause menu open");
   }
@@ -1276,6 +1281,7 @@ void VrPauseMenuBuilt() {
 bool mcla_menu_cancel(PPCRegister& r31) {
   if (g_active_menu.load(std::memory_order_relaxed) < 0) {  // outside our submenus: the pause menu closes
     g_vr_pause_cancel_ms = VrNowMs();
+    ++g_vr_pause_events;
     if (g_vr_pause_open.exchange(false)) {
       REXLOG_INFO("VR: pause menu closed");
     }

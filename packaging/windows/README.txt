@@ -25,7 +25,7 @@ Play
 In the game
 - The pause menu has a VR page: render size (with the video memory it needs), headset size
   (no AA, MSAA, DLAA or a DLSS upscale), and a frame rate cap.
-- Start at the title screen and main menu recentres the view (once you are in the game it pauses instead);
+- Start at the main menu recentres the view (in the game it pauses instead);
   RECENTRE at the top of the pause menu's VR page and F8 recentre at any time.
 - Options can be added after the program name, for example a shortcut to
   "Midnight Club LA VR.exe" --vr=false   (plays on the monitor)

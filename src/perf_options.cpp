@@ -16,6 +16,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -354,6 +355,8 @@ void VrApplyHeadsetSize() {
   rex::cvar::SetFlagByName("vr_dlss_output_scale", std::to_string(VrHeadsetUpscale()).c_str());
 }
 
+uint32_t VrPauseMenuEvents();  // settings_menu.cpp
+
 bool VrRequested() {
   const char* v = std::getenv("MCLA_VR");
   return (v && v[0] == '1') || rex::cvar::Query<bool>("vr");
@@ -369,17 +372,23 @@ bool ShowingGameplay();
 
 void MclaConfigureGpuDefaults() {
   if (VrRequested()) {
-    // Start pressed before the game is first played (the intro, the title's "press start", the main menu): the headset
-    // recentres on the head, so the game starts facing where the player sits (Matt 2026-10-27, 2026-10-30). Not after
-    // that: the pause menu is on the screen too (not gameplay), and Start closing it recentred. Back no longer
+    // Start outside the game (the main menu waiting for it, the front end): the headset recentres on the head, so the
+    // game starts facing where the player sits (Matt 2026-10-27, 2026-10-30). In the game Start opens or closes the
+    // pause menu: no recentre then, known by the pause menu's events in the 0.4 s after the press (the main menu
+    // shows the head-tracked view and a HUD layer too, so the frames cannot tell it from the game). Back no longer
     // recentres (it opens the GPS map): RECENTRE heads the pause menu's VR page (Matt 2026-10-30).
     rex::input::SetButtonPressedHook([](uint16_t button) {
-      static bool played = false;
-      played = played || rex::ui::vulkan::vr::ShowingGameplay();
-      if (button == 0x0010 /* START */ && !played) {
-        rex::ui::vulkan::vr::Recenter();
-        REXLOG_INFO("VR: recentred (Start before the game is played)");
+      if (button != 0x0010 /* START */) {
+        return;
       }
+      const uint32_t events = VrPauseMenuEvents();
+      std::thread([events] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        if (VrPauseMenuEvents() == events) {
+          rex::ui::vulkan::vr::Recenter();
+          REXLOG_INFO("VR: recentred (Start outside the game)");
+        }
+      }).detach();
     });
   }
   std::vector<std::pair<const char*, const char*>> defaults = {
