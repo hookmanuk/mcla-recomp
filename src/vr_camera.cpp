@@ -388,6 +388,48 @@ extern "C" REX_FUNC(sub_8217D460) {
 // pose again and the camera settled turned and moved by the head (a real head is never exactly at the recentred
 // origin): out of the car, and the race's intro waited for it with the controls locked. Both setters that pose (the
 // update thread's and the render thread's, on the same two viewports) put it back. MCLA_VR_UNPOSED_READBACK=0: off.
+// After the Back menu's pages (the GPS map) the camera stays unposed until the game's own camera comes to rest (half a
+// second unchanged, at most 8 s): picking a race on the map warps there and eases the camera down from the map into the
+// seat, and with the head moving during that descent it stopped part-way (low, beside the car) for good and the race's
+// intro waited with the controls locked, while kept still it landed. Unposed, the descent runs as on a monitor (on the
+// fixed screen, as the map was). MCLA_VR_SETTLE=0: off. The update thread only (the camera calls it hooks).
+bool CameraSettling(const uint8_t* base, uint32_t camera) {
+  static const bool enabled = !(std::getenv("MCLA_VR_SETTLE") && std::getenv("MCLA_VR_SETTLE")[0] == '0');
+  static bool panel_was = false, settling = false;
+  static std::chrono::steady_clock::time_point until, still_since;
+  static float last[16];
+  if (!enabled) {
+    return false;
+  }
+  const bool panel = vr::UiPanel();
+  const auto now = std::chrono::steady_clock::now();
+  if (panel_was && !panel) {
+    settling = true;
+    until = now + std::chrono::seconds(8);
+    still_since = now;
+    std::memset(last, 0, sizeof(last));
+    REXLOG_INFO("VR: the camera unposed until it settles (after a menu page)");
+  }
+  panel_was = panel;
+  if (!settling) {
+    return false;
+  }
+  bool same = true;
+  for (int i = 0; i < 16; ++i) {
+    const float v = LoadFloat(base + camera + 4 * i);
+    same = same && ((i & 3) == 3 || std::abs(v - last[i]) < 1e-3f);
+    last[i] = v;
+  }
+  if (!same) {
+    still_since = now;
+  }
+  if (now - still_since > std::chrono::milliseconds(500) || now > until) {
+    settling = false;
+    REXLOG_INFO("VR: the camera settled, posed again");
+  }
+  return settling;
+}
+
 void KeepGameCamera(uint8_t* base, uint32_t viewport, const float (&game)[16]) {
   static const bool enabled =
       !(std::getenv("MCLA_VR_UNPOSED_READBACK") && std::getenv("MCLA_VR_UNPOSED_READBACK")[0] == '0');
@@ -498,7 +540,8 @@ extern "C" REX_FUNC(sub_8217CE80) {
   FramePose frame{ctx.r3.u32};
   // Not under the Back menu's pages (the GPS map, the mission log): a 2D page over a view the game moves itself, shown
   // whole on the screen (posed, the page was head-locked and cut off, the map culled as the head turned).
-  frame.posed = vr::HeadPose(frame.pose, frame.tangents) && !vr::UiPanel();
+  const bool settling = CameraSettling(base, ctx.r4.u32);  // every call: it watches the menu panel close
+  frame.posed = vr::HeadPose(frame.pose, frame.tangents) && !vr::UiPanel() && !settling;
   if (frame.posed) {
     // A symmetric frustum covering both eyes' (Perspective has no off-centre form).
     const float h = std::max(-frame.tangents[0], frame.tangents[1]),
