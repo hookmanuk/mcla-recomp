@@ -9,8 +9,8 @@ What you need
 - Your own disc image: Midnight Club: Los Angeles Complete Edition, Xbox 360, USA/Europe
   (title 545407F8), as an .iso file.
 - Windows 10 or 11 (64-bit), a Vulkan GPU, a PC VR headset with an OpenXR runtime
-  (SteamVR, for example). DLSS needs an NVIDIA RTX GPU; without it the game uses its own
-  anti-aliasing.
+  (SteamVR, for example). DLSS (experimental) needs an NVIDIA RTX GPU; without it the game
+  uses its own anti-aliasing.
 - About 15 GB of free disk space and an internet connection for the first run.
 
 Play
@@ -24,7 +24,8 @@ Play
 
 In the game
 - The pause menu has a VR page: render size (with the video memory it needs), headset size
-  (no AA, MSAA, DLAA or a DLSS upscale), and a frame rate cap.
+  (no AA, MSAA, DLAA or a DLSS upscale), and a frame rate cap. DLAA and the DLSS upscales
+  are experimental: they can shimmer at times.
 - Start at the main menu recentres the view (in the game it pauses instead);
   RECENTRE at the top of the pause menu's VR page and F8 recentre at any time.
 - Options can be added after the program name, for example a shortcut to
