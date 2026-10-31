@@ -1,5 +1,14 @@
 # MCLA
 
+## VR version
+
+**Midnight Club: Los Angeles in VR**, for PC VR headsets (OpenXR: SteamVR and others), is built from this project.
+
+- **Download:** [the latest release](https://github.com/hookmanuk/mcla-recomp/releases/latest), a Windows zip. It contains no game files: on first run it asks for your own disc image and builds the game on your PC.
+- **Source:** the [`vr` branch](https://github.com/hookmanuk/mcla-recomp/tree/vr).
+
+The rest of this README describes the recompilation itself.
+
 Static recompilation of *Midnight Club: Los Angeles Complete Edition* (Xbox 360, title 545407F8) to native code, for Windows, Linux and jailbroken PS5 consoles.
 
 ![The game installed on a PS5 home screen](docs/images/ps5-home-screen.webp)
