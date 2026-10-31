@@ -383,7 +383,9 @@ extern "C" REX_FUNC(sub_8217D460) {
 // grcViewport::SetCameraMtx(this, const Matrix44* camera): rows right, up, back (the camera looks down -z) and
 // position.
 // After the Back menu's pages (the GPS map) the camera stays unposed until the game's own camera is back at the car
-// (within 3 m of it) and at rest (half a second unchanged; 15 s at most): picking a race on the map warps there and
+// (within 3 m of it) and at rest there (its place against the car's moving under 1 cm an update for 0.3 s; 15 s at
+// most. Unchanged in the world for 0.5 s took the 15 s in the cockpit: the camera moves with the car, Matt 2026-10-31
+// "it stays in a window for many seconds after going back to the cockpit"): picking a race on the map warps there and
 // swoops the camera down from the map into the seat, and with the head moving during that the camera stopped part-way
 // (low, beside the car) for good and the race's intro waited with the controls locked. Unposed, the swoop runs as on a
 // monitor (on the fixed screen, as the map was). MCLA_VR_SETTLE=0: off. The update thread only.
@@ -395,18 +397,19 @@ bool CameraSettling(const uint8_t* base, uint32_t camera, bool& map_page) {
   static const bool enabled = !(std::getenv("MCLA_VR_SETTLE") && std::getenv("MCLA_VR_SETTLE")[0] == '0');
   static bool map_was = false, settling = false;
   static std::chrono::steady_clock::time_point until, still_since;
-  static float last[16];
+  static float last_offset[3];
   const auto now = std::chrono::steady_clock::now();
   float m[16];
   for (int i = 0; i < 16; ++i) {
     m[i] = LoadFloat(base + camera + 4 * i);
   }
   bool at_car = false;
+  float offset[3]{};
   if (const uint32_t car = g_car_matrix.load(std::memory_order_relaxed)) {
     float d2 = 0.f;
     for (int i = 0; i < 3; ++i) {
-      const float d = m[12 + i] - LoadFloat(base + car + 48 + 4 * i);
-      d2 += d * d;
+      offset[i] = m[12 + i] - LoadFloat(base + car + 48 + 4 * i);
+      d2 += offset[i] * offset[i];
     }
     at_car = d2 < 9.f;
   }
@@ -432,16 +435,16 @@ bool CameraSettling(const uint8_t* base, uint32_t camera, bool& map_page) {
     return false;
   }
   bool same = true;
-  for (int i = 0; i < 16; ++i) {
-    same = same && ((i & 3) == 3 || std::abs(m[i] - last[i]) < 1e-3f);
-    last[i] = m[i];
+  for (int i = 0; i < 3; ++i) {
+    same = same && std::abs(offset[i] - last_offset[i]) < 0.01f;
+    last_offset[i] = offset[i];
   }
   if (!same || !at_car) {
     still_since = now;
   }
-  if (now - still_since > std::chrono::milliseconds(500) || now > until) {
+  if (now - still_since > std::chrono::milliseconds(300) || now > until) {
     settling = false;
-    REXLOG_INFO("VR: the camera settled, posed again");
+    REXLOG_INFO("VR: the camera settled, posed again{}", now > until ? " (15 s, not settled)" : "");
   }
   return settling;
 }
