@@ -1267,6 +1267,10 @@ int64_t VrNowMs() {
       .count();
 }
 
+// When the GPS map's page was last drawn (VrMapPageMs; vr_camera.cpp shows the map's frames on the screen).
+std::atomic<int64_t> g_vr_map_page_ms{0};
+int64_t VrMapPageMs() { return g_vr_map_page_ms.load(std::memory_order_relaxed); }
+
 // The pause menu's builds and cancels so far (VrPauseMenuEvents): Start in the game opens or closes it.
 std::atomic<uint32_t> g_vr_pause_events{0};
 uint32_t VrPauseMenuEvents() { return g_vr_pause_events.load(); }
@@ -1298,6 +1302,16 @@ bool mcla_menu_cancel(PPCRegister& r31) {
 }
 
 bool mcla_menu_populate_redirect(PPCRegister& r3) {
+  {  // VR: the GPS map's page (its menu state 'PromptMap', however it opens: Back or a tutorial's A) drawn now
+    static constexpr char kMapState[] = "PromptMap";
+    const uint32_t state = r3.u32;
+    if (state && Read32(state + 16) == 0x42) {  // a menu state (the engine's tag)
+      if (const uint32_t name_ea = Read32(state + 20);
+          name_ea && std::memcmp(Membase() + name_ea, kMapState, sizeof(kMapState)) == 0) {
+        g_vr_map_page_ms.store(VrNowMs(), std::memory_order_relaxed);
+      }
+    }
+  }
   const int menu = g_active_menu.load(std::memory_order_relaxed);
   uint32_t settings = g_settings_state.load(std::memory_order_relaxed);
   if (menu >= 0 && settings && r3.u32 == settings) {

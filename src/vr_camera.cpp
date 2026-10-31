@@ -35,6 +35,7 @@ REXCVAR_DEFINE_BOOL(vr_cockpit_sway, false, "VR",
                     "The cockpit camera sliding in the car as it accelerates and brakes (off: held at the seat)");
 
 namespace vr = rex::ui::vulkan::vr;
+int64_t VrMapPageMs();  // settings_menu.cpp: when the GPS map's page was last drawn (steady clock, ms)
 
 namespace {
 
@@ -386,14 +387,15 @@ extern "C" REX_FUNC(sub_8217D460) {
 // swoops the camera down from the map into the seat, and with the head moving during that the camera stopped part-way
 // (low, beside the car) for good and the race's intro waited with the controls locked. Unposed, the swoop runs as on a
 // monitor (on the fixed screen, as the map was). MCLA_VR_SETTLE=0: off. The update thread only.
-bool CameraSettling(const uint8_t* base, uint32_t camera) {
+// map_page: the GPS map is up (a menu panel, vr::UiPanel, with the map's own menu state 'PromptMap' drawn in the last
+// 2 s, however it opened: Back, a tutorial's A; kept until the panel closes, through the mission log): 2D, on the
+// screen. The pause menu (Start), a race's start screens and the cutscenes are panels too: they stay head-tracked
+// (Matt: only the map).
+bool CameraSettling(const uint8_t* base, uint32_t camera, bool& map_page) {
   static const bool enabled = !(std::getenv("MCLA_VR_SETTLE") && std::getenv("MCLA_VR_SETTLE")[0] == '0');
-  static bool panel_was = false, settling = false;
+  static bool map_was = false, settling = false;
   static std::chrono::steady_clock::time_point until, still_since;
   static float last[16];
-  if (!enabled) {
-    return false;
-  }
   const auto now = std::chrono::steady_clock::now();
   float m[16];
   for (int i = 0; i < 16; ++i) {
@@ -408,14 +410,24 @@ bool CameraSettling(const uint8_t* base, uint32_t camera) {
     }
     at_car = d2 < 9.f;
   }
+  static bool panel_was = false;
   const bool panel = vr::UiPanel();
-  if (panel_was && !panel) {
-    REXLOG_INFO("VR: the camera unposed until it settles (after a menu page)");
+  const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+  map_page = panel && (map_was || now_ms - VrMapPageMs() < 2000);
+  if (panel && !panel_was) {
+    REXLOG_INFO("VR: a menu panel ({})", map_page ? "the map, on the screen" : "head-tracked");
+  }
+  panel_was = panel;
+  if (map_page != map_was) {
+    REXLOG_INFO("VR: the map's pages {}", map_page ? "open (on the screen)" : "closed");
+  }
+  if (enabled && map_was && !map_page) {
+    REXLOG_INFO("VR: the camera unposed until it settles (after the map)");
     settling = true;
     until = now + std::chrono::seconds(15);
     still_since = now;
   }
-  panel_was = panel;
+  map_was = map_page;
   if (!settling) {
     return false;
   }
@@ -522,8 +534,9 @@ extern "C" REX_FUNC(sub_8217CE80) {
   FramePose frame{ctx.r3.u32};
   // Not under the Back menu's pages (the GPS map, the mission log): a 2D page over a view the game moves itself, shown
   // whole on the screen (posed, the page was head-locked and cut off, the map culled as the head turned).
-  const bool settling = CameraSettling(base, ctx.r4.u32);  // every call: it watches for the descents
-  frame.posed = vr::HeadPose(frame.pose, frame.tangents) && !vr::UiPanel() && !settling;
+  bool map_page = false;
+  const bool settling = CameraSettling(base, ctx.r4.u32, map_page);  // every call: it watches for the descents
+  frame.posed = vr::HeadPose(frame.pose, frame.tangents) && !map_page && !settling;
   if (frame.posed) {
     // A symmetric frustum covering both eyes' (Perspective has no off-centre form).
     const float h = std::max(-frame.tangents[0], frame.tangents[1]),
