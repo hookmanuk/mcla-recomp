@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -164,10 +165,14 @@ uint32_t LoadU32(const uint8_t* p) {
   return __builtin_bswap32(v);
 }
 
-// Holds the cockpit camera (m: rows, the game's camera) at its seat in the car: its place, and its pitch with no roll
-// (the game's heading is kept: looking left or right). The seat is where the camera was in the body's frame after the
-// car stood still for half a second (learn: the update thread's first setting of a frame); only a camera inside the
-// car looking along it (cockpit view, not the bumper, chase or look-back views) is held.
+// Holds the game's camera (m: rows) at its seat in the car, against the game's sway as the car accelerates and brakes.
+// Each view has its seat: where the camera was in the body's frame after the car stood still for half a second (learn:
+// the update thread's first setting of a frame), the view told by that place (the nearest seat). Inside the car looking
+// along it (cockpit, hood): its place, and its pitch with no roll (the game's heading kept: looking left or right).
+// Behind it looking along it (the chase views): its distance along the car only - the game swung it 5.9-9.9 m back
+// as the car accelerated and braked (users: "the camera sliding forwards and backwards as you accelerate"); its height,
+// its swing aside and where it looks stay the game's. One seat for every view before: stopping in the hood view moved
+// the cockpit's seat to the hood, and the chase views were not held at all.
 void HoldCockpitCamera(uint8_t* base, float (&m)[16], bool learn) {
   const uint32_t car_address = g_car_matrix.load(std::memory_order_relaxed);
   if (REXCVAR_GET(vr_cockpit_sway) || !car_address) {
@@ -202,31 +207,76 @@ void HoldCockpitCamera(uint8_t* base, float (&m)[16], bool learn) {
   for (int r = 0; r < 3; ++r) {
     back[r] = m[8] * rows[r][0] + m[9] * rows[r][1] + m[10] * rows[r][2];
   }
+  const bool chase = std::abs(local[0]) < 3.f && local[1] > 0.f && local[1] < 6.f && local[2] > 1.5f &&
+                     local[2] < 30.f && along > 0.7f;
+  struct Seat {
+    bool valid = false;
+    float place[3]{}, pitch = 0.f;
+  };
   static uint32_t seat_car = 0;
-  static bool have_seat = false;
-  static float seat[3], seat_pitch = 0.f, last_position[3];
+  static std::array<Seat, 8> seats;
+  static size_t next_seat = 0;
+  static float last_position[3];
   static int still = 0;
+  // The view's seat: the nearest within 0.5 m inside the car (the cockpit's sway is ~3 cm; the hood view is 0.9 m from
+  // it), 3.5 m behind it (the chase camera swung 5.8-9.4 m back about a seat at 8.2 m).
+  const float reach = cockpit ? 0.5f : 3.5f;
+  const auto nearest = [&]() -> Seat* {
+    Seat* best = nullptr;
+    float best_d = reach * reach;
+    for (Seat& seat : seats) {
+      const float dx = seat.place[0] - local[0], dy = seat.place[1] - local[1], dz = seat.place[2] - local[2];
+      if (seat.valid && dx * dx + dy * dy + dz * dz < best_d) {
+        best_d = dx * dx + dy * dy + dz * dz;
+        best = &seat;
+      }
+    }
+    return best;
+  };
   if (learn) {
     if (car_address != seat_car) {
       seat_car = car_address;
-      have_seat = false;
+      seats = {};
       still = 0;
     }
     const float dx = position[0] - last_position[0], dy = position[1] - last_position[1],
                 dz = position[2] - last_position[2];
     std::memcpy(last_position, position, sizeof(position));
     still = dx * dx + dy * dy + dz * dz < 1e-6f ? still + 1 : 0;  // under 1 mm a frame
-    if (cockpit && still >= 30) {
-      std::memcpy(seat, local, sizeof(seat));
-      seat_pitch = back[1];
-      have_seat = true;
+    if ((cockpit || chase) && still >= 30) {
+      Seat* seat = nearest();
+      if (!seat) {
+        seat = &seats[next_seat];
+        next_seat = (next_seat + 1) % seats.size();
+      }
+      std::memcpy(seat->place, local, sizeof(local));
+      seat->pitch = back[1];
+      seat->valid = true;
     }
   }
-  if (!cockpit || !have_seat || seat_car != car_address) {
+  const Seat* seat = cockpit || chase ? nearest() : nullptr;
+  if (static const bool log = std::getenv("MCLA_VR_SWAY_LOG") != nullptr; log && learn) {  // development
+    static auto last = std::chrono::steady_clock::now();
+    if (std::chrono::steady_clock::now() - last > std::chrono::milliseconds(250)) {
+      last = std::chrono::steady_clock::now();
+      REXLOG_INFO("VR sway: {} still {} camera in body {:.3f} {:.3f} {:.3f} seat {:.3f} {:.3f} {:.3f}",
+                  cockpit ? "inside" : chase ? "chase" : "other", still, local[0], local[1], local[2],
+                  seat ? seat->place[0] : 0.f, seat ? seat->place[1] : 0.f, seat ? seat->place[2] : 0.f);
+    }
+  }
+  if (!seat || seat_car != car_address) {
     return;
   }
+  if (chase) {  // its distance along the car only
+    const float d = seat->place[2] - local[2];
+    for (int c = 0; c < 3; ++c) {
+      m[12 + c] += d * rows[2][c];
+    }
+    return;
+  }
+  const float seat_pitch = seat->pitch;
   for (int c = 0; c < 3; ++c) {
-    m[12 + c] = position[c] + seat[0] * rows[0][c] + seat[1] * rows[1][c] + seat[2] * rows[2][c];
+    m[12 + c] = position[c] + seat->place[0] * rows[0][c] + seat->place[1] * rows[1][c] + seat->place[2] * rows[2][c];
   }
   // In the body's frame: back keeps its heading at the seat's pitch, up is the body's up made square to it.
   const float level = std::sqrt(back[0] * back[0] + back[2] * back[2]);
