@@ -38,8 +38,10 @@ New-Item -ItemType Directory -Force "$dist\setup\project", "$dist\setup\tools\ll
 # --- the launcher (MSVC's libraries through the Build Tools, the project's Clang)
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $vs = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+$vsInstaller = Split-Path $vswhere -Parent
 $launcherCmd = "$root\out\launcher.cmd"
 @(
+    "@set `"PATH=$vsInstaller;%PATH%`"",
     "@call `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul || exit /b 1",
     "`"$($llvm.FullName)\bin\clang++.exe`" -O2 -std=c++20 -fuse-ld=lld -municode `"$PSScriptRoot\launcher.cpp`" -o `"$dist\Midnight Club LA VR.exe`" -lole32 -lshell32 -luser32 -Wl,/subsystem:windows || exit /b 1"
 ) | Set-Content -Encoding Ascii $launcherCmd
